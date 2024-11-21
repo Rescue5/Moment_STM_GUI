@@ -58,7 +58,7 @@ local function onTelemetry(t)
 end
 
 local function onDisconnect()
-   print('-- bye --')
+   print('Motor stopped')
 end
 
 --------------------------------------------------------------------------------

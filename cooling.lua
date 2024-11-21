@@ -30,8 +30,7 @@ local function onTelemetry(t)
 end
 
 local function onDisconnect()
-   throttle(0)
-   print('-- Freeze mod disabled --')
+   print('Motor stopped')
 end
 
 --------------------------------------------------------------------------------
