@@ -58,7 +58,6 @@ local function onTelemetry(t)
 end
 
 local function onDisconnect()
-   throttle(0)
    print('-- bye --')
 end
 
