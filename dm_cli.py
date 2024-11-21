@@ -9,6 +9,7 @@ class DMCLIHandler:
         :param log_callback: Функция для логирования (например, log_to_console).
         """
         self.log_callback = log_callback
+        self.active_process = None  # Хранение активного процесса
 
     def log(self, message):
         """Вывод сообщения в лог."""
@@ -29,36 +30,49 @@ class DMCLIHandler:
             command[0] = f"./{command[0]}"
 
         try:
-            process = subprocess.Popen(
+
+            self.active_process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
 
             if real_time:
                 # Читаем вывод команды в реальном времени
-                for line in iter(process.stdout.readline, ""):
+                for line in iter(self.active_process.stdout.readline, ""):
                     self.log(line.strip())
 
-                process.stdout.close()
-                process.wait()
+                self.active_process.stdout.close()
+                self.active_process.wait()
 
                 # Обрабатываем ошибки
-                if process.returncode != 0:
-                    for line in iter(process.stderr.readline, ""):
+                if self.active_process.returncode != 0:
+                    for line in iter(self.active_process.stderr.readline, ""):
                         self.log(line.strip())
-                    process.stderr.close()
+                    self.active_process.stderr.close()
 
-                return process.returncode
+                return self.active_process.returncode
 
             else:
-                stdout, stderr = process.communicate()
+                stdout, stderr = self.active_process.communicate()
                 self.log(stdout.strip())
-                if process.returncode != 0:
+                if self.active_process.returncode != 0:
                     self.log(stderr.strip())
-                return process.returncode
+                return self.active_process.returncode
 
         except Exception as e:
-            self.log(f"Ошибка запуска dm-cli: {e}")
+            print(f"Ошибка запуска dm-cli: {e}")
             return -1
+
+    def stop_command(self):
+        """Прерывает выполнение текущей команды dm-cli."""
+        if self.active_process:
+            if self.active_process.poll() is None:
+                self.log("Прерывание процесса dm-cli.")
+                self.active_process.terminate()
+            else:
+                self.log("Процесс dm-cli уже завершен.")
+            self.active_process = None
+        else:
+            self.log("Нет активного процесса для прерывания.")
 
     def run_test(self, port, pulse_max, script):
         """
