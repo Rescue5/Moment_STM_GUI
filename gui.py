@@ -11,32 +11,29 @@ from ttkthemes import ThemedTk
 from tkinter import scrolledtext
 from PIL import Image, ImageTk
 import os
-import datetime  # Для временных меток
+import datetime
 import subprocess
 import platform
 from dm_cli import DMCLIHandler
 
 dm_cli_handler = None
 
-last_command = None  # Переменная для хранения последней отправленной команды
+last_command = None
 
-# Флаги, очереди и блокировки
 stop_event = threading.Event()
 command_queue = queue.Queue()
-lock = threading.Lock()  # Для синхронизации доступа к сериалу
+lock = threading.Lock()
 test_running = threading.Event()
 
-
 count = 0
-previous_rpm = []  # Для хранения значений RPM предыдущей скорости
-current_rpm = []   # Для хранения значений RPM текущей скорости
-current_speed = None  # Текущая скорость для сбора данных
+previous_rpm = []
+current_rpm = []
+current_speed = None
 current_speed_check = 0
 previous_speed = None  # Предыдущая скорость для анализа
-stand_name = None     # Название стенда
+stand_name = None  # Название стенда
 
 rpm_received = False
-
 
 # Добавляем в раздел глобальных переменных
 previous_avg_rpm = None  # Среднее RPM предыдущей скорости
@@ -52,27 +49,25 @@ BAUD_RATE = 115200
 
 ser = None  # Глобальная переменная для хранения объекта Serial
 process_commands_thread = None  # Поток обработки команд
-read_serial_thread = None       # Поток чтения данных
+read_serial_thread = None  # Поток чтения данных
 
 # Переменные для логирования
 log_file = None
 csv_file = None
-log_file_lock = threading.Lock()  # Для синхронизации доступа к лог-файлам
+log_file_lock = threading.Lock()
 
 
 def parse_and_save_to_csv(data):
     """Парсинг строки и запись в CSV + анализ оборотов."""
-
     global current_rpm, previous_rpm, current_speed, previous_speed
     global current_avg_rpm, previous_avg_rpm, rpm_count
     global test_target_speed, progress_complete
     global rpm_received, current_speed_check
-    # global current_moment_var, current_thrust_var, current_rpm_var
+
     if data.startswith("Speed set to:"):
         parts = data.split(":")
         try:
             speed = int(parts[1].strip())
-            # Обновляем прогресс-бар
             current_speed_check = speed
             update_progress_bar(speed)
         except (IndexError, ValueError) as e:
@@ -127,9 +122,6 @@ def parse_and_save_to_csv(data):
                 log_to_console("Неизвестный тип стенда.")
                 return
 
-            if rpm is not None:
-                rpm_received = True  # Получены данные по RPM
-
             # Проверяем, существует ли файл CSV
             write_headers = False
             if test_running.is_set() and csv_file:
@@ -144,70 +136,64 @@ def parse_and_save_to_csv(data):
                     with open(csv_file, 'a', newline='') as csvfile:
                         csv_writer = csv.writer(csvfile, delimiter=';')
                         if write_headers:
-                            if stand_name == "пропеллер":
-                                csv_writer.writerow(
-                                    ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
-                            elif stand_name == "момент":
-                                csv_writer.writerow(
-                                    ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
-                            elif stand_name == "шпиндель":
-                                csv_writer.writerow(
-                                    ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
-                        # Записываем данные
-                        if stand_name == "пропеллер":
-                            csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
-                        elif stand_name == "момент":
-                            csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
-                        elif stand_name == "шпиндель":
-                            csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
+                            csv_writer.writerow(
+                                ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
+                        csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
 
-            # Обработка RPM для анализа
+            # Анализ RPM
             if current_speed != speed:
-                # Если переключение на новую скорость
                 if current_avg_rpm is not None:
-                    # Обновляем предыдущую среднюю скорость только после анализа
-                    previous_avg_rpm = current_avg_rpm
+                    previous_avg_rpm = current_avg_rpm  # Обновляем предыдущую среднюю скорость
 
-                if previous_avg_rpm is not None and current_avg_rpm is not None:
-                    # Сравниваем средние значения RPM двух предыдущих скоростей
-                    analyze_rpm()
-
-                # Обновляем скорости
-
-                # Обновляем текущую скорость
+                # Сбрасываем данные для новой скорости
                 previous_speed = current_speed
                 current_speed = speed
-
-                # Сбрасываем сбор RPM для новой скорости
                 current_rpm = []
                 rpm_count = 0
                 current_avg_rpm = None
 
-            if current_avg_rpm is None:
-                # Собираем только первые 5 RPM для текущей скорости
-                if rpm_count == 5:
-                    current_avg_rpm = sum(current_rpm) / len(current_rpm)
-                    log_to_console(f"Среднее RPM для скорости {current_speed}: {current_avg_rpm:.2f}")
-                    if previous_avg_rpm is not None:
-                        analyze_rpm()
-            # Если уже собрано 5 RPM, дальнейшие значения игнорируются для анализа
-            # Но все еще записываются в CSV и лог
+            # Добавляем данные RPM для текущей скорости
+            if rpm is not None:
+                rpm_received = True  # Получены данные по RPM
+                current_rpm.append(rpm)
+                rpm_count += 1
 
-
+            # Рассчитываем среднее RPM после сбора 5 значений
+            if rpm_count == 5:
+                current_avg_rpm = sum(current_rpm) / len(current_rpm)
+                log_to_console(f"Среднее RPM для скорости {current_speed}: {current_avg_rpm:.2f}")
+                if previous_avg_rpm is not None:
+                    analyze_rpm()
 
         except (IndexError, ValueError) as e:
             log_to_console(f"Ошибка парсинга данных: {data} | Ошибка: {e}")
 
 
-def monitor_speed_and_rpm():
-    """Проверяет состояние скорости и RPM, если скорость 1300 и данные по RPM не получены, останавливает тест."""
-    global current_speed_check, rpm_received
-    while not stop_event.is_set():
-        # log_to_console(f"{current_speed_check} {rpm_received}")
-        if current_speed_check >= 1300 and not rpm_received:
-            log_to_console("Скорость 1300, но RPM не получены. Остановка теста.")
-            command_queue.put("STOP")
-        time.sleep(1)  # Проверять каждую секунду
+def analyze_rpm():
+    """Анализирует средние RPM для текущей и предыдущей скорости."""
+    global previous_avg_rpm, current_avg_rpm
+
+    if previous_avg_rpm is None or current_avg_rpm is None:
+        return  # Недостаточно данных для анализа
+
+    log_to_console(f"Сравнение RPM между скоростью {previous_speed} ({previous_avg_rpm:.2f}) "
+                   f"и скоростью {current_speed} ({current_avg_rpm:.2f})")
+
+    if current_avg_rpm < previous_avg_rpm:
+        log_to_console(
+            "Среднее RPM на текущей скорости меньше, чем на предыдущей. Остановка теста.")
+        command_queue.put("STOP")
+        return
+
+    # Вычисляем процент изменения между RPM
+    rpm_change_percent = abs((current_avg_rpm - previous_avg_rpm) / (previous_avg_rpm + 1.0)) * 100
+
+    log_to_console(f"Изменение RPM: {rpm_change_percent:.2f}%")
+
+    # Если изменение менее 4%, останавливаем тест
+    if rpm_change_percent < 4:
+        log_to_console("Слишком малый рост оборотов. Остановка теста.")
+        stop_test()
 
 
 def connect_to_stand():
@@ -227,9 +213,7 @@ def connect_to_stand():
     # Если мы не на Windows, добавляем "./" для вызова исполняемого файла
     if platform.system() != "Windows":
         command[0] = f"./{command[0]}"
-
     try:
-
         if read_serial_thread is None or not read_serial_thread.is_alive():
             read_serial_thread = threading.Thread(
                 target=read_serial, daemon=True)
@@ -270,39 +254,6 @@ def connect_to_stand():
             log_to_console(f"Ошибка подключения:\n{result.stderr}")
     except Exception as e:
         log_to_console(f"Ошибка выполнения dm-cli: {e}")
-
-
-def start_monitoring_thread():
-    monitoring_thread = threading.Thread(target=monitor_speed_and_rpm, daemon=True)
-    monitoring_thread.start()
-
-
-def analyze_rpm():
-    """Анализирует средние RPM для текущей и предыдущей скорости."""
-    global previous_avg_rpm, current_avg_rpm, test_running, previous_speed, current_speed
-
-    if previous_avg_rpm is None or current_avg_rpm is None:
-        return  # Недостаточно данных для анализа
-
-    # log_to_console(f"Сравнение RPM между скоростью {previous_speed} ({previous_avg_rpm:.2f}) "
-    #               f"и скоростью {current_speed} ({current_avg_rpm:.2f})")
-
-    if current_avg_rpm < previous_avg_rpm:
-        log_to_console(
-            "Среднее RPM на текущей скорости меньше, чем на предыдущей. Остановка теста.")
-        command_queue.put("STOP")
-        return
-
-    # Вычисляем процент изменения между RPM
-    rpm_change_percent = (
-        (current_avg_rpm - previous_avg_rpm) / previous_avg_rpm) * 100
-
-    # log_to_console(f"Изменение RPM: {rpm_change_percent:.2f}%")
-
-    # Если изменение менее 4%, останавливаем тест
-    if abs(rpm_change_percent) < 4:
-        log_to_console("Слишком малый рост оборотов. Остановка теста.")
-        command_queue.put("STOP")
 
 
 def log_to_console(message):
@@ -352,6 +303,7 @@ def read_serial():
                     rpm_received = False
                     previous_speed = None
                     test_running.clear()
+                    reset_test_state()
                     reset_progress_bar()
 
                 # Проверяем название стенда
@@ -376,49 +328,12 @@ def read_serial():
             time.sleep(1)  # Ждем процесса dm-cli
 
 
-def send_command(command):
-    """Отправка команды в Serial."""
-    try:
-        with lock:
-            ser.write((command + '\n').encode('utf-8'))
-            ser.flush()
-        log_to_console(f"Отправлена команда: {command}")
-    except Exception as e:
-        log_to_console(f"Ошибка при отправке команды: {e}")
-
-
 def process_commands():
     """Функция для обработки команд от пользователя."""
     global last_command  # Используем глобальную переменную
     while not stop_event.is_set():
         try:
             command = command_queue.get(timeout=1)
-            # Проверяем, не совпадает ли новая команда с предыдущей
-            if command == last_command:
-                log_to_console(f"Пропущена повторная команда: {command}")
-                continue  # Если команда такая же, пропускаем её
-
-            # Обновляем последнюю команду и продолжаем обработку
-            last_command = command
-            log_to_console(f"Получена команда из очереди: {command}")
-
-            if command == "STOP":
-                send_command(command)
-                time.sleep(10)
-                test_running.clear()  # Останавливаем только тест, программа продолжает работать
-                log_to_console("Тест остановлен.")
-                reset_progress_bar()
-            elif command.startswith("START"):
-                test_running.set()  # Устанавливаем флаг, что тест запущен
-                send_command(command)
-                log_to_console("Тест запущен.")
-            elif command == "INFO":
-                send_command(command)
-                log_to_console("Команда INFO отправлена.")
-            elif command.startswith("PULSE_THRESHOLD_") or command.startswith("MOMENT_TENZ_") or command.startswith(
-                    "THRUST_TENZ_"):
-                send_command(command)
-                log_to_console(f"Команда {command} отправлена.")
         except queue.Empty:
             continue
 
@@ -427,18 +342,25 @@ def start_test():
     """Запуск теста."""
     global log_file, csv_file, stand_name, previous_rpm, current_rpm, current_speed, previous_speed, \
         previous_avg_rpm, current_avg_rpm, rpm_count, test_target_speed, progress_complete, dm_cli_handler
+    global dm_cli_handler, read_serial_thread, process_commands_thread
 
-    previous_rpm = []  # Для хранения значений RPM предыдущей скорости
-    current_rpm = []  # Для хранения значений RPM текущей скорости
-    current_speed = None  # Текущая скорость для сбора данных
-    previous_speed = None  # Предыдущая скорость для анализа
+    reset_test_state()
+    # Сбрасываем состояния
+    stop_event.clear()
+    test_running.clear()
 
-    start_monitoring_thread()
+    # Создаем новый экземпляр dm_cli_handler
+    dm_cli_handler = DMCLIHandler(log_to_console)
 
-    # Добавляем в раздел глобальных переменных
-    previous_avg_rpm = None  # Среднее RPM предыдущей скорости
-    current_avg_rpm = None  # Среднее RPM текущей скорости
-    rpm_count = 0  # Счетчик RPM для текущей скорости
+    # Перезапускаем поток чтения данных
+    if read_serial_thread is None or not read_serial_thread.is_alive():
+        read_serial_thread = threading.Thread(target=read_serial, daemon=True)
+        read_serial_thread.start()
+
+    # Перезапускаем поток обработки команд
+    if process_commands_thread is None or not process_commands_thread.is_alive():
+        process_commands_thread = threading.Thread(target=process_commands, daemon=True)
+        process_commands_thread.start()
 
     # Получаем названия двигателя и пропеллера
     propeller_name = propeller_name_entry.get()
@@ -483,20 +405,16 @@ def start_test():
                 log_to_console(f"Ошибка при удалении существующих файлов: {e}")
                 return
 
-    # Устанавливаем целевую скорость
-    test_target_speed = pulse_max  # Устанавливаем целевую скорость
+    test_target_speed = pulse_max
     log_to_console(f"Целевая скорость установлена на {test_target_speed} RPM.")
 
-    # Сброс прогресс-бара и флага завершения
     reset_progress_bar()
 
-    # Получаем порт для теста
     port = com_port_combobox.get()
     if not port:
         log_to_console("Выберите порт для подключения.")
         return
 
-    # Создаем экземпляр DMCLIHandler
     dm_cli_handler = DMCLIHandler(log_to_console)
 
     # Запускаем dm-cli в отдельном потоке
@@ -512,7 +430,7 @@ def start_test():
 
 def stop_test():
     """Остановка теста или охлаждения."""
-    global dm_cli_handler, test_running
+    global dm_cli_handler, test_running, read_serial_thread, process_commands_thread
 
     if test_running.is_set():
         log_to_console("Остановка активного процесса...")
@@ -520,14 +438,27 @@ def stop_test():
         # Завершаем процесс dm-cli
         if dm_cli_handler and dm_cli_handler.active_process:
             dm_cli_handler.stop_command()
-            log_to_console("Процесс dm-cli завершен.")
 
-        # Сбрасываем флаг выполнения
+        # Сбрасываем флаги и останавливаем потоки
+        stop_event.set()
         test_running.clear()
 
-        # Сбрасываем прогресс-бар
+        # Принудительно завершаем потоки
+        if read_serial_thread and read_serial_thread.is_alive():
+            read_serial_thread.join(timeout=1)
+            read_serial_thread = None
+
+        if process_commands_thread and process_commands_thread.is_alive():
+            process_commands_thread.join(timeout=1)
+            process_commands_thread = None
+
+        if dm_cli_handler and dm_cli_handler.active_process:
+            dm_cli_handler.stop_command()
+        dm_cli_handler = None
+        log_to_console("dm_cli_handler сброшен.")
+
+        reset_test_state()
         reset_progress_bar()
-        log_to_console("Процесс остановлен.")
     else:
         log_to_console("Нет активного процесса для остановки.")
 
@@ -559,6 +490,7 @@ def start_freeze():
         finally:
             # Сбрасываем флаг выполнения после завершения процесса
             test_running.clear()
+            reset_test_state()
 
     # Устанавливаем флаг выполнения
     test_running.set()
@@ -572,6 +504,28 @@ def emergency_stop(event):
     """Экстренная остановка по нажатию клавиши."""
     log_to_console("Экстренная остановка: нажата клавиша 'Esc'.")
     stop_test()
+    reset_test_state()
+
+def reset_test_state():
+    global current_rpm, previous_rpm, current_speed, previous_speed
+    global current_avg_rpm, previous_avg_rpm, rpm_count
+    global rpm_received, current_speed_check, test_target_speed
+    global command_queue
+
+    previous_rpm = []
+    current_rpm = []
+    current_speed = None
+    previous_speed = None
+    previous_avg_rpm = None
+    current_avg_rpm = None
+    rpm_count = 0
+    rpm_received = False
+    current_speed_check = 0
+    test_target_speed = None
+
+    with lock:
+        while not command_queue.empty():
+            command_queue.get()
 
 
 def update_stand_name(stand_name):
@@ -631,31 +585,6 @@ def reset_progress_bar():
     root.after(0, lambda: progress_var.set(0))
     root.after(0, lambda: progress_label.config(text="Прогресс: 0%"))
 
-# Функции для отправки настроек
-
-def send_pulse_threshold():
-    """Отправка команды для настройки PULSE_THRESHOLD."""
-    value = pulse_threshold_entry.get().strip()
-    if value.isdigit() and int(value) > 0:
-        command = f"PULSE_THRESHOLD_{value}"
-        command_queue.put(command)
-    else:
-        messagebox.showerror(
-            "Ошибка ввода", "Введите корректное положительное целое число для PULSE_THRESHOLD.")
-
-
-def send_moment_tenz():
-    """Отправка команды для настройки MOMENT_TENZ."""
-    try:
-        value = float(moment_tenz_entry.get().strip())
-        if value > 0:
-            command = f"MOMENT_TENZ_{value}"
-            command_queue.put(command)
-        else:
-            raise ValueError
-    except ValueError:
-        messagebox.showerror(
-            "Ошибка ввода", "Введите корректное положительное число для MOMENT_TENZ.")
 
 def update_com_ports():
     """Обновляет список доступных COM-портов."""
@@ -669,20 +598,6 @@ def update_com_ports():
         com_port_combobox.set("Выберите COM-порт")
     except Exception as e:
         log_to_console(f"Ошибка при обновлении списка портов: {e}")
-
-
-def send_thrust_tenz():
-    """Отправка команды для настройки THRUST_TENZ."""
-    try:
-        value = float(thrust_tenz_entry.get().strip())
-        if value > 0:
-            command = f"THRUST_TENZ_{value}"
-            command_queue.put(command)
-        else:
-            raise ValueError
-    except ValueError:
-        messagebox.showerror(
-            "Ошибка ввода", "Введите корректное положительное число для THRUST_TENZ.")
 
 
 # Основное окно
@@ -753,7 +668,6 @@ progress_bar = ttk.Progressbar(
     progress_frame, variable=progress_var, maximum=100)
 progress_bar.pack(fill='x', padx=10, pady=5)
 
-
 # Настройки COM-порта в тестовой вкладке
 com_frame = tk.Frame(test_frame)
 com_frame.grid(row=3, column=0, pady=10, sticky='w')
@@ -772,16 +686,10 @@ com_frame.columnconfigure(1, weight=1)
 connect_info_frame = tk.Frame(test_frame)
 connect_info_frame.grid(row=3, column=1, padx=10, pady=10, sticky='e')
 
-# def combined_command_for_info():
-#     connect_to_arduino()
-#     command_queue.put("INFO")
-
-
 connect_button = ttk.Button(
     connect_info_frame, text="Подключение к стенду", command=connect_to_stand
 )
 connect_button.pack(side=tk.LEFT, padx=5, pady=5)
-
 
 # Настройки на вкладке "Настройки"
 pulse_threshold_label = tk.Label(
@@ -790,9 +698,8 @@ pulse_threshold_label.grid(row=0, column=0, padx=10, pady=5, sticky='e')
 pulse_threshold_entry = tk.Entry(settings_frame)
 pulse_threshold_entry.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
 pulse_threshold_button = ttk.Button(
-    settings_frame, text="Отправить", command=send_pulse_threshold)
+    settings_frame, text="Отправить", command=lambda x: x)
 pulse_threshold_button.grid(row=0, column=2, padx=10, pady=5)
-
 
 moment_tenz_label = tk.Label(
     settings_frame, text="Коэффициент момента\n(1 по умолчанию)")
@@ -800,9 +707,8 @@ moment_tenz_label.grid(row=1, column=0, padx=10, pady=5, sticky='e')
 moment_tenz_entry = tk.Entry(settings_frame)
 moment_tenz_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
 moment_tenz_button = ttk.Button(
-    settings_frame, text="Отправить", command=send_moment_tenz)
+    settings_frame, text="Отправить", command=lambda x: x)
 moment_tenz_button.grid(row=1, column=2, padx=10, pady=5)
-
 
 thrust_tenz_label = tk.Label(
     settings_frame, text="Коэффициент тяги\n(1 по умолчанию)")
@@ -810,9 +716,8 @@ thrust_tenz_label.grid(row=2, column=0, padx=10, pady=5, sticky='e')
 thrust_tenz_entry = tk.Entry(settings_frame)
 thrust_tenz_entry.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
 thrust_tenz_button = ttk.Button(
-    settings_frame, text="Отправить", command=send_thrust_tenz)
+    settings_frame, text="Отправить", command=lambda x: x)
 thrust_tenz_button.grid(row=2, column=2, padx=10, pady=5)
-
 
 # Позволяет полю ввода растягиваться
 settings_frame.columnconfigure(1, weight=1)
@@ -823,7 +728,7 @@ button_frame.grid(row=5, column=0, columnspan=3,
                   pady=(10, 0), sticky='ew', padx=10)
 
 start_button = ttk.Button(button_frame, text="Запустить тест",
-                         command=start_test, state=tk.DISABLED)
+                          command=start_test, state=tk.DISABLED)
 start_button.grid(row=0, column=0, padx=10, pady=5)
 
 stop_button = ttk.Button(
@@ -845,7 +750,7 @@ refresh_ports_button.pack(side=tk.LEFT, padx=5, pady=5)
 
 # Инструкция пользователю
 instruction_label = tk.Label(
-    button_frame, text="Подключитесь к стенду и нажмите 'Информация о стенде', перед запуском теста.")
+    button_frame, text="Подключитесь к стенду перед началом теста.")
 instruction_label.grid(row=2, column=0, columnspan=3,
                        padx=10, pady=5, sticky='w')
 
