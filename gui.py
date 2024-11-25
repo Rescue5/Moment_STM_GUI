@@ -44,6 +44,9 @@ rpm_count = 0  # Счетчик RPM для текущей скорости
 test_target_speed = None  # Целевая скорость для текущего теста
 progress_complete = False  # Флаг завершения прогресса
 
+current_values = []  # Список для хранения значений тока на одной скорости
+max_current_threshold = 65.0  # Установленный порог среднего значения тока
+
 # Настройки
 BAUD_RATE = 115200
 
@@ -140,10 +143,10 @@ def parse_and_save_to_csv(data):
                                 ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
                         csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
 
-            # Анализ RPM
             if current_speed != speed:
+                current_values.clear()
                 if current_avg_rpm is not None:
-                    previous_avg_rpm = current_avg_rpm  # Обновляем предыдущую среднюю скорость
+                    previous_avg_rpm = current_avg_rpm
 
                 # Сбрасываем данные для новой скорости
                 previous_speed = current_speed
@@ -165,6 +168,16 @@ def parse_and_save_to_csv(data):
                 if previous_avg_rpm is not None:
                     analyze_rpm()
 
+            # Добавляем данные тока
+            if current is not None:
+                current_values.append(current)
+                if len(current_values) == 20:
+                    avg_current = sum(current_values) / len(current_values)
+                    log_to_console(f"Средний ток для скорости {current_speed}: {avg_current:.2f}")
+                    if avg_current > max_current_threshold:
+                        log_to_console("Средний ток превышает порог. Остановка теста.")
+                        stop_test()
+
         except (IndexError, ValueError) as e:
             log_to_console(f"Ошибка парсинга данных: {data} | Ошибка: {e}")
 
@@ -182,7 +195,7 @@ def analyze_rpm():
     if current_avg_rpm < previous_avg_rpm:
         log_to_console(
             "Среднее RPM на текущей скорости меньше, чем на предыдущей. Остановка теста.")
-        command_queue.put("STOP")
+        stop_test()
         return
 
     # Вычисляем процент изменения между RPM
@@ -500,6 +513,17 @@ def start_freeze():
     cooling_thread.start()
 
 
+def set_max_current_threshold():
+    """Устанавливает значение порога для среднего тока."""
+    global max_current_threshold
+    try:
+        value = float(max_current_threshold_entry.get())
+        max_current_threshold = value
+        log_to_console(f"Порог среднего тока установлен на: {max_current_threshold}")
+    except ValueError:
+        log_to_console("Ошибка: Введите корректное число для порога тока.")
+
+
 def emergency_stop(event):
     """Экстренная остановка по нажатию клавиши."""
     log_to_console("Экстренная остановка: нажата клавиша 'Esc'.")
@@ -511,6 +535,8 @@ def reset_test_state():
     global current_avg_rpm, previous_avg_rpm, rpm_count
     global rpm_received, current_speed_check, test_target_speed
     global command_queue
+
+    current_values.clear()
 
     previous_rpm = []
     current_rpm = []
@@ -555,13 +581,10 @@ def update_progress_bar(speed):
     if not test_running.is_set() or test_target_speed is None or progress_complete:
         return  # Тест не запущен или прогресс уже завершен
 
-    # Определяем минимальную скорость (1000 RPM)
     min_speed = 1000
 
-    # Вычисляем прогресс
     progress = ((speed - min_speed) / (test_target_speed - min_speed)) * 100
 
-    # Ограничиваем прогресс до 100%
     if progress >= 100:
         progress = 100
         progress_complete = True
@@ -602,8 +625,8 @@ def update_com_ports():
 
 # Основное окно
 root = ThemedTk()
-root.get_themes()  # Получаем доступные темы
-root.set_theme("arc")  # Устанавливаем желаемую тему
+root.get_themes()
+root.set_theme("arc")
 
 root.title("Тестирование")
 
@@ -718,6 +741,18 @@ thrust_tenz_entry.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
 thrust_tenz_button = ttk.Button(
     settings_frame, text="Отправить", command=lambda x: x)
 thrust_tenz_button.grid(row=2, column=2, padx=10, pady=5)
+
+max_current_threshold_label = tk.Label(
+    settings_frame, text="Порог среднего тока\n(по умолчанию 10.0)")
+max_current_threshold_label.grid(row=3, column=0, padx=10, pady=5, sticky='e')
+
+max_current_threshold_entry = tk.Entry(settings_frame)
+max_current_threshold_entry.insert(0, "10.0")  # Значение по умолчанию
+max_current_threshold_entry.grid(row=3, column=1, padx=10, pady=5, sticky='ew')
+
+max_current_threshold_button = ttk.Button(
+    settings_frame, text="Установить", command=set_max_current_threshold)
+max_current_threshold_button.grid(row=3, column=2, padx=10, pady=5)
 
 # Позволяет полю ввода растягиваться
 settings_frame.columnconfigure(1, weight=1)
