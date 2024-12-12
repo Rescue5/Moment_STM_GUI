@@ -14,11 +14,18 @@ import os
 import datetime
 import subprocess
 import platform
+
 from dm_cli import DMCLIHandler
+from analyzer import analyze_rpm, analyze_current, analyze_temperature
 
 dm_cli_handler = None
-
 last_command = None
+
+project_root = os.path.dirname(os.path.abspath(__file__))
+tests_folder = os.path.join(project_root, 'tests')
+lua_folder = os.path.join(project_root, 'lua')
+
+manual_frame = False
 
 stop_event = threading.Event()
 command_queue = queue.Queue()
@@ -35,17 +42,18 @@ stand_name = None  # Название стенда
 
 rpm_received = False
 
-# Добавляем в раздел глобальных переменных
 previous_avg_rpm = None  # Среднее RPM предыдущей скорости
 current_avg_rpm = None  # Среднее RPM текущей скорости
 rpm_count = 0  # Счетчик RPM для текущей скорости
 
-# Добавляем переменные для прогресс-бара
 test_target_speed = None  # Целевая скорость для текущего теста
 progress_complete = False  # Флаг завершения прогресса
 
 current_values = []  # Список для хранения значений тока на одной скорости
-max_current_threshold = 65.0  # Установленный порог среднего значения тока
+max_current_threshold = 900.0  # Установленный порог среднего значения тока
+
+temperature_values = []  # Список для хранения значений температуры на одной скорости
+max_temperature_threshold = 1000000  # Установленный порог среднего значения температуры
 
 # Настройки
 BAUD_RATE = 115200
@@ -59,9 +67,14 @@ log_file = None
 csv_file = None
 log_file_lock = threading.Lock()
 
+lopasti = 3
+
+pulse_min = 800
+pulse_max = 2200
+
 
 def parse_and_save_to_csv(data):
-    """Парсинг строки и запись в CSV + анализ оборотов."""
+    """Парсинг строки и запись в CSV + анализ некоторых данных"""
     global current_rpm, previous_rpm, current_speed, previous_speed
     global current_avg_rpm, previous_avg_rpm, rpm_count
     global test_target_speed, progress_complete
@@ -81,164 +94,107 @@ def parse_and_save_to_csv(data):
         parts = data.split(":")
         try:
             speed = int(parts[1].strip())
-            moment = None
-            thrust = None
-            rpm = None
-            current = None
-            voltage = None
-            power = None
-
-            if stand_name == "пропеллер":
-                if len(parts) >= 8:
+            moment, thrust, rpm, current, voltage, power, temperature, mech_power, kpd = (None,) * 9
+            if stand_name in ["пропеллер", "момент", "шпиндель"]:
+                if len(parts) >= 20:
                     moment = float(parts[3].strip())
-                    thrust = float(parts[5].strip())
-                    rpm = float(parts[7].strip())
+                    thrust = int(parts[5].strip())
+                    rpm = int(parts[7].strip())
                     current = float(parts[9].strip())
                     voltage = float(parts[11].strip())
                     power = float(parts[13].strip())
+                    temperature = float(parts[15].strip())
+                    mech_power = float(parts[17].strip())
+                    kpd = float(parts[19].strip())
                 else:
-                    log_to_console(
-                        "Недостаточно данных для пропеллера: " + data)
+                    log_to_console(f"Недостаточно данных для {stand_name}: " + data)
                     return
-            elif stand_name == "момент":
-                if len(parts) >= 8:
-                    moment = float(parts[3].strip())
-                    thrust = float(parts[5].strip())
-                    rpm = float(parts[7].strip())
-                    current = float(parts[9].strip())
-                    voltage = float(parts[11].strip())
-                    power = float(parts[13].strip())
-                else:
-                    log_to_console("Недостаточно данных для момента: " + data)
-                    return
-            elif stand_name == "шпиндель":
-                if len(parts) >= 8:
-                    moment = float(parts[3].strip())
-                    thrust = float(parts[5].strip())
-                    rpm = float(parts[7].strip())
-                    current = float(parts[9].strip())
-                    voltage = float(parts[11].strip())
-                    power = float(parts[13].strip())
-                else:
-                    log_to_console("Недостаточно данных для шпинделя: " + data)
             else:
                 log_to_console("Неизвестный тип стенда.")
                 return
 
-            # Проверяем, существует ли файл CSV
             write_headers = False
             if test_running.is_set() and csv_file:
                 if not os.path.exists(csv_file):
                     write_headers = True
-                else:
-                    # Если файл существует, проверяем его размер
-                    if os.path.getsize(csv_file) == 0:
-                        write_headers = True
+                elif os.path.getsize(csv_file) == 0:
+                    write_headers = True
 
                 with log_file_lock:
                     with open(csv_file, 'a', newline='') as csvfile:
                         csv_writer = csv.writer(csvfile, delimiter=';')
                         if write_headers:
                             csv_writer.writerow(
-                                ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power"])
-                        csv_writer.writerow([speed, moment, thrust, rpm, current, voltage, power])
+                                ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power", "Temperature", "Mech.Power", "KPD"])
+                        csv_writer.writerow([
+                            str(speed).replace('.', ','),
+                            str(moment).replace('.', ',') if moment is not None else "",
+                            str(thrust).replace('.', ',') if thrust is not None else "",
+                            str(rpm).replace('.', ',') if rpm is not None else "",
+                            str(current).replace('.', ',') if current is not None else "",
+                            str(voltage).replace('.', ',') if voltage is not None else "",
+                            str(power).replace('.', ',') if power is not None else "",
+                            str(temperature).replace('.', ',') if temperature is not None else "",
+                            str(mech_power).replace('.', ',') if mech_power is not None else "",
+                            str(kpd).replace('.', ',') if kpd is not None else ""
+                        ])
 
             if current_speed != speed:
                 current_values.clear()
+                temperature_values.clear()
                 if current_avg_rpm is not None:
                     previous_avg_rpm = current_avg_rpm
 
-                # Сбрасываем данные для новой скорости
                 previous_speed = current_speed
                 current_speed = speed
                 current_rpm = []
                 rpm_count = 0
                 current_avg_rpm = None
 
-            # Добавляем данные RPM для текущей скорости
-            if rpm is not None:
-                rpm_received = True  # Получены данные по RPM
+            if rpm is not None and not manual_frame:
+                rpm_received = True
                 current_rpm.append(rpm)
                 rpm_count += 1
 
-            # Рассчитываем среднее RPM после сбора 5 значений
-            if rpm_count == 5:
+            if rpm_count == 5 and not manual_frame:
                 current_avg_rpm = sum(current_rpm) / len(current_rpm)
                 log_to_console(f"Среднее RPM для скорости {current_speed}: {current_avg_rpm:.2f}")
-                if previous_avg_rpm is not None:
-                    analyze_rpm()
+                analyze_rpm(current_avg_rpm, previous_avg_rpm, current_speed, previous_speed, log_to_console, stop_test)
 
-            # Добавляем данные тока
-            if current is not None:
+            if current is not None and not manual_frame:
                 current_values.append(current)
-                if len(current_values) == 20:
-                    avg_current = sum(current_values) / len(current_values)
-                    log_to_console(f"Средний ток для скорости {current_speed}: {avg_current:.2f}")
-                    if avg_current > max_current_threshold:
-                        log_to_console("Средний ток превышает порог. Остановка теста.")
-                        stop_test()
+                analyze_current(current_values, current_speed, log_to_console, stop_test, max_current_threshold)
+
+            if temperature is not None and not manual_frame:
+                temperature_values.append(temperature)
+                analyze_temperature(temperature_values, current_speed, log_to_console, stop_test, max_temperature_threshold)
 
         except (IndexError, ValueError) as e:
             log_to_console(f"Ошибка парсинга данных: {data} | Ошибка: {e}")
-
-
-def analyze_rpm():
-    """Анализирует средние RPM для текущей и предыдущей скорости."""
-    global previous_avg_rpm, current_avg_rpm
-
-    if previous_avg_rpm is None or current_avg_rpm is None:
-        return  # Недостаточно данных для анализа
-
-    log_to_console(f"Сравнение RPM между скоростью {previous_speed} ({previous_avg_rpm:.2f}) "
-                   f"и скоростью {current_speed} ({current_avg_rpm:.2f})")
-
-    if current_avg_rpm < previous_avg_rpm:
-        log_to_console(
-            "Среднее RPM на текущей скорости меньше, чем на предыдущей. Остановка теста.")
-        stop_test()
-        return
-
-    # Вычисляем процент изменения между RPM
-    rpm_change_percent = abs((current_avg_rpm - previous_avg_rpm) / (previous_avg_rpm + 1.0)) * 100
-
-    log_to_console(f"Изменение RPM: {rpm_change_percent:.2f}%")
-
-    # Если изменение менее 4%, останавливаем тест
-    if rpm_change_percent < 4:
-        log_to_console("Слишком малый рост оборотов. Остановка теста.")
-        stop_test()
 
 
 def connect_to_stand():
     """Выполняет команду для подключения к стенду через dm-cli и обрабатывает наименование стенда."""
     global ser, process_commands_thread, read_serial_thread, log_file, csv_file
     global stand_name
-    port = com_port_combobox.get()  # Получаем выбранный порт
-    script = "test_conn.lua"  # Указываем скрипт подключения
+    port = com_port_combobox.get()
+    script = os.path.join(lua_folder, "test_conn.lua")
 
     if not port:
         log_to_console("Выберите порт из выпадающего списка.")
         return
 
-    # Определяем базовую команду
-    command = ["dm-cli", "test", "--port", port, script]
+    command = ["dm-cli.exe", "test", "--port", port, script]
 
-    # Если мы не на Windows, добавляем "./" для вызова исполняемого файла
     if platform.system() != "Windows":
-        command[0] = f"./{command[0]}"
+        command[0] = f"./dm-cli"
     try:
         if read_serial_thread is None or not read_serial_thread.is_alive():
             read_serial_thread = threading.Thread(
-                target=read_serial, daemon=True)
+                target=read_output, daemon=True)
             read_serial_thread.start()
             log_to_console("Поток чтения данных запущен.")
 
-        if process_commands_thread is None or not process_commands_thread.is_alive():
-            process_commands_thread = threading.Thread(
-                target=process_commands, daemon=True)
-            process_commands_thread.start()
-            log_to_console("Поток обработки команд запущен.")
-        # Запускаем команду и получаем вывод
         result = subprocess.run(command, capture_output=True, text=True)
 
         if result.returncode == 0:
@@ -256,7 +212,7 @@ def connect_to_stand():
                         instruction_label.config(
                             text=f"Стенд: {stand_name.capitalize()}. Теперь можно запускать тест."
                         )
-                        start_button.config(state=tk.NORMAL)  # Активируем кнопку "Запустить тест"
+                        start_button.config(state=tk.NORMAL)
                     else:
                         log_to_console("Неизвестный тип стенда.")
                     break
@@ -271,16 +227,24 @@ def connect_to_stand():
 
 def log_to_console(message):
     """Вывод сообщения в консольное окно и в stdout для отладки с временной меткой."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    console_output.config(state=tk.NORMAL)
-    console_output.insert(tk.END, f"[{timestamp}] {message}\n")
-    console_output.yview(tk.END)
-    console_output.config(state=tk.DISABLED)
+    global manual_frame
+    if not manual_frame:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        console_output.config(state=tk.NORMAL)
+        console_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        console_output.yview(tk.END)
+        console_output.config(state=tk.DISABLED)
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        manual_console_output.config(state=tk.NORMAL)
+        manual_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        manual_console_output.yview(tk.END)
+        manual_console_output.config(state=tk.DISABLED)
     # Также выводим в стандартный вывод для отладки
     print(f"[{timestamp}] {message}")
 
 
-def read_serial():
+def read_output():
     """Читает данные из dm-cli и обрабатывает их в реальном времени."""
     global log_file, csv_file, stand_name, current_speed, current_speed_check, rpm_received, previous_speed
 
@@ -290,10 +254,10 @@ def read_serial():
                 line = dm_cli_handler.active_process.stdout.readline()
                 if not line:
                     break
-                data = line.strip()  # Убираем лишние пробелы
-                log_to_console(data)  # Выводим данные в консоль
+                data = line.strip()
+                log_to_console(data)
 
-                # Записываем в лог-файл, если тест запущен
+                    # Записываем в лог-файл, если тест запущен
                 if test_running.is_set() and log_file and csv_file:
                     with log_file_lock:
                         try:
@@ -341,21 +305,12 @@ def read_serial():
             time.sleep(1)  # Ждем процесса dm-cli
 
 
-def process_commands():
-    """Функция для обработки команд от пользователя."""
-    global last_command  # Используем глобальную переменную
-    while not stop_event.is_set():
-        try:
-            command = command_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-
-
 def start_test():
     """Запуск теста."""
     global log_file, csv_file, stand_name, previous_rpm, current_rpm, current_speed, previous_speed, \
         previous_avg_rpm, current_avg_rpm, rpm_count, test_target_speed, progress_complete, dm_cli_handler
-    global dm_cli_handler, read_serial_thread, process_commands_thread
+    global dm_cli_handler, read_serial_thread, process_commands_thread, lopasti
+    global pulse_max, pulse_min
 
     reset_test_state()
     # Сбрасываем состояния
@@ -367,32 +322,22 @@ def start_test():
 
     # Перезапускаем поток чтения данных
     if read_serial_thread is None or not read_serial_thread.is_alive():
-        read_serial_thread = threading.Thread(target=read_serial, daemon=True)
+        read_serial_thread = threading.Thread(target=read_output, daemon=True)
         read_serial_thread.start()
 
-    # Перезапускаем поток обработки команд
-    if process_commands_thread is None or not process_commands_thread.is_alive():
-        process_commands_thread = threading.Thread(target=process_commands, daemon=True)
-        process_commands_thread.start()
-
-    # Получаем названия двигателя и пропеллера
     propeller_name = propeller_name_entry.get()
     if stand_name != 'шпиндель':
         engine_name = engine_name_entry.get()
     else:
         engine_name = 'shpindel'
 
-    # Получаем значение процентов с ползунка
-    percent = speed_percent_slider.get()
-    pulse_max = 1000 + (percent * 10)  # Рассчитываем значение pulseMax
-
     if not engine_name or not propeller_name:
         log_to_console("Введите названия двигателя и пропеллера.")
         return
 
     # Составляем имена файлов для логов и CSV
-    log_file = f"{engine_name}_{propeller_name}_log.txt"
-    csv_file = f"{engine_name}_{propeller_name}_data.csv"
+    log_file = os.path.join(tests_folder,  f"{engine_name}_{propeller_name}_log.txt")
+    csv_file = os.path.join(tests_folder,  f"{engine_name}_{propeller_name}_data.csv")
 
     # Проверяем, существуют ли уже файлы с таким именем
     if os.path.exists(log_file) or os.path.exists(csv_file):
@@ -431,8 +376,9 @@ def start_test():
     dm_cli_handler = DMCLIHandler(log_to_console)
 
     # Запускаем dm-cli в отдельном потоке
+    script = os.path.join(lua_folder, "moment_test.lua")
     test_thread = threading.Thread(
-        target=dm_cli_handler.run_test, args=(port, pulse_max, "moment_test.lua"), daemon=True
+        target=dm_cli_handler.run_test, args=(port, pulse_max, pulse_min, script, lopasti), daemon=True
     )
     test_thread.start()
 
@@ -478,39 +424,30 @@ def stop_test():
 
 def start_freeze():
     """Отправка команды для запуска охлаждения через dm-cli."""
-    global dm_cli_handler, test_running
+    global dm_cli_handler, test_running, lopasti, pulse_min
 
-    # Получаем выбранный порт из выпадающего списка
+    # Сброс состояния и проверка порта
+    reset_test_state()
     port = com_port_combobox.get()
-
     if not port:
         log_to_console("Выберите порт для подключения.")
         return
 
-    # Проверяем, существует ли экземпляр dm_cli_handler
+    # Создаем новый экземпляр dm_cli_handler, если нужно
     if not dm_cli_handler:
-        log_to_console("dm-cli не инициализирован.")
-        return
-
-    # Функция для запуска dm-cli в отдельном потоке
-    def run_cooling_command():
-        try:
-            log_to_console(f"Запуск охлаждения через dm-cli на порту {port}...")
-            dm_cli_handler.run_command(["test", "--port", port, "cooling.lua"])
-            log_to_console("Охлаждение успешно завершено.")
-        except Exception as e:
-            log_to_console(f"Ошибка запуска охлаждения через dm-cli: {e}")
-        finally:
-            # Сбрасываем флаг выполнения после завершения процесса
-            test_running.clear()
-            reset_test_state()
+        dm_cli_handler = DMCLIHandler(log_to_console)
 
     # Устанавливаем флаг выполнения
     test_running.set()
 
-    # Запускаем команду в отдельном потоке
-    cooling_thread = threading.Thread(target=run_cooling_command, daemon=True)
+    # Запускаем dm-cli в отдельном потоке
+    script = os.path.join(lua_folder, "cooling.lua")
+    cooling_thread = threading.Thread(
+        target=dm_cli_handler.run_test, args=(port, 1200, pulse_min, script, lopasti), daemon=True
+    )
     cooling_thread.start()
+
+    log_to_console("Запуск охлаждения завершен.")
 
 
 def set_max_current_threshold():
@@ -623,7 +560,95 @@ def update_com_ports():
         log_to_console(f"Ошибка при обновлении списка портов: {e}")
 
 
-# Основное окно
+def set_lopasti():
+    """Устанавливает значение для глобальной переменной lopasti."""
+    global lopasti
+    try:
+        new_value = int(lopasti_entry.get())
+        lopasti = new_value
+        log_to_console(f"Значение lopasti изменено на: {lopasti}")
+    except ValueError:
+        log_to_console("Ошибка: введите целое число для lopasti.")
+
+
+def update_pulse_values():
+    """Обновляет значения pulse_min и pulse_max на основе положения ползунков."""
+    global pulse_min, pulse_max
+    new_min = speed_min_percent_slider.get()
+    new_max = speed_max_percent_slider.get()
+
+    # Логика, чтобы минимальное значение не превышало максимального
+    if new_min > new_max:
+        speed_min_percent_slider.set(new_max)  # Синхронизируем минимальный ползунок
+        new_min = new_max
+
+    # Обновляем глобальные переменные
+    pulse_min = new_min
+    pulse_max = new_max
+
+    # Логируем обновление
+    log_to_console(f"Обновлено: Минимальное значение ШИМ={pulse_min}, Максимальное значение ШИМ={pulse_max}")
+
+
+def start_manual_monitoring():
+    """Запуск мониторинга во вкладке 'Ручное управление'."""
+    global dm_cli_handler, test_running, lopasti
+
+    reset_test_state()
+    port = com_port_combobox.get()
+    log_to_console(port)
+    if not port:
+        log_to_console("Выберите порт для подключения.")
+        return
+
+    if not dm_cli_handler:
+        dm_cli_handler = DMCLIHandler(log_to_console)
+
+    test_running.set()
+
+    try:
+        script = os.path.join(lua_folder,"monitoring.lua")
+        monitoring_thread = threading.Thread(
+            target=dm_cli_handler.run_test,
+            args=(port, 1200, 1200, script, lopasti),
+            daemon=True
+        )
+
+        monitoring_thread.start()
+        log_to_console("Запуск мониторинга")
+    except Exception as e:
+        log_to_console(f"Ошибка при запуске мониторинга: {e}")
+
+
+def stop_manual_monitoring():
+    """Остановка мониторинга во вкладке 'Ручное управление'."""
+    global dm_cli_handler, test_running, read_serial_thread, process_commands_thread
+
+    if test_running.is_set():
+        log_to_console("Остановка мониторинга...")
+
+        # Завершаем процесс dm-cli
+        if dm_cli_handler and dm_cli_handler.active_process:
+            dm_cli_handler.stop_command()
+
+        # Сбрасываем флаги и останавливаем потоки
+        stop_event.set()
+        test_running.clear()
+
+        # Принудительно завершаем потоки
+        if read_serial_thread and read_serial_thread.is_alive():
+            read_serial_thread.join(timeout=1)
+            read_serial_thread = None
+
+        if process_commands_thread and process_commands_thread.is_alive():
+            process_commands_thread.join(timeout=1)
+            process_commands_thread = None
+
+        dm_cli_handler = None
+        log_to_console("Мониторинг завершен.")
+    else:
+        log_to_console("Мониторинг не запущен.")
+
 root = ThemedTk()
 root.get_themes()
 root.set_theme("arc")
@@ -641,6 +666,10 @@ notebook.add(test_frame, text="Тест")
 # Вкладка с настройками
 settings_frame = tk.Frame(notebook)
 notebook.add(settings_frame, text="Настройки")
+
+# Вкладка для ручного управления
+manual_control_frame = tk.Frame(notebook)
+notebook.add(manual_control_frame, text="Ручное управление")
 
 # Создаем основную рамку для размещения элементов
 main_frame = tk.Frame(root, padx=10, pady=10)
@@ -672,16 +701,43 @@ except FileNotFoundError:
 
 input_frame.columnconfigure(1, weight=1)
 
-# Ползунок для теста
-speed_percent_label = tk.Label(test_frame, text="Процент разгона:")
-speed_percent_label.grid(row=1, column=0, padx=10, pady=5, sticky='w')
-speed_percent_slider = tk.Scale(test_frame, from_=10, to=100,
-                                orient=tk.HORIZONTAL, length=300, resolution=10, tickinterval=10)
-speed_percent_slider.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+# Ползунок для максимального значения
+speed_max_percent_label = tk.Label(test_frame, text="Максимальное значение ШИМ:")
+speed_max_percent_label.grid(row=1, column=0, padx=10, pady=5, sticky='w')
+
+speed_max_percent_slider = tk.Scale(
+    test_frame,
+    from_=800,  # Начальное значение
+    to=2200,  # Максимальное значение
+    orient=tk.HORIZONTAL,
+    length=300,
+    resolution=100,  # Шаг изменения
+    tickinterval=150,  # Интервал для отметок
+    command=lambda _: update_pulse_values()
+)
+speed_max_percent_slider.set(pulse_max)  # Устанавливаем начальное значение
+speed_max_percent_slider.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+
+# Ползунок для минимального значения
+speed_min_percent_label = tk.Label(test_frame, text="Минимальное значение ШИМ:")
+speed_min_percent_label.grid(row=2, column=0, padx=10, pady=5, sticky='w')
+
+speed_min_percent_slider = tk.Scale(
+    test_frame,
+    from_=800,  # Начальное значение
+    to=2200,  # Максимальное значение
+    orient=tk.HORIZONTAL,
+    length=300,
+    resolution=100,  # Шаг изменения
+    tickinterval=150,  # Интервал для отметок
+    command=lambda _: update_pulse_values()
+)
+speed_min_percent_slider.set(pulse_min)  # Устанавливаем начальное значение
+speed_min_percent_slider.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
 
 # Прогресс бар и метка
 progress_frame = tk.Frame(test_frame)
-progress_frame.grid(row=2, column=0, columnspan=2, pady=(10, 10), sticky='ew')
+progress_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10), sticky='ew')
 
 progress_label = tk.Label(progress_frame, text="Прогресс: 0%")
 progress_label.pack(anchor='w', padx=10)
@@ -693,7 +749,7 @@ progress_bar.pack(fill='x', padx=10, pady=5)
 
 # Настройки COM-порта в тестовой вкладке
 com_frame = tk.Frame(test_frame)
-com_frame.grid(row=3, column=0, pady=10, sticky='w')
+com_frame.grid(row=4, column=0, pady=10, sticky='w')
 
 com_port_label = tk.Label(com_frame, text="Выберите COM-порт:")
 com_port_label.grid(row=0, column=0, padx=10, pady=5, sticky='w')
@@ -707,7 +763,7 @@ com_frame.columnconfigure(1, weight=1)
 
 # Новый фрейм для кнопок "Подключение к стенду" и "Информация о стенде"
 connect_info_frame = tk.Frame(test_frame)
-connect_info_frame.grid(row=3, column=1, padx=10, pady=10, sticky='e')
+connect_info_frame.grid(row=4, column=1, padx=10, pady=10, sticky='e')
 
 connect_button = ttk.Button(
     connect_info_frame, text="Подключение к стенду", command=connect_to_stand
@@ -715,44 +771,31 @@ connect_button = ttk.Button(
 connect_button.pack(side=tk.LEFT, padx=5, pady=5)
 
 # Настройки на вкладке "Настройки"
-pulse_threshold_label = tk.Label(
-    settings_frame, text="Колличество пульсов\nна 10 оборотов\n(70 по умлочанию)")
-pulse_threshold_label.grid(row=0, column=0, padx=10, pady=5, sticky='e')
-pulse_threshold_entry = tk.Entry(settings_frame)
-pulse_threshold_entry.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
-pulse_threshold_button = ttk.Button(
-    settings_frame, text="Отправить", command=lambda x: x)
-pulse_threshold_button.grid(row=0, column=2, padx=10, pady=5)
-
-moment_tenz_label = tk.Label(
-    settings_frame, text="Коэффициент момента\n(1 по умолчанию)")
-moment_tenz_label.grid(row=1, column=0, padx=10, pady=5, sticky='e')
-moment_tenz_entry = tk.Entry(settings_frame)
-moment_tenz_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
-moment_tenz_button = ttk.Button(
-    settings_frame, text="Отправить", command=lambda x: x)
-moment_tenz_button.grid(row=1, column=2, padx=10, pady=5)
-
-thrust_tenz_label = tk.Label(
-    settings_frame, text="Коэффициент тяги\n(1 по умолчанию)")
-thrust_tenz_label.grid(row=2, column=0, padx=10, pady=5, sticky='e')
-thrust_tenz_entry = tk.Entry(settings_frame)
-thrust_tenz_entry.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
-thrust_tenz_button = ttk.Button(
-    settings_frame, text="Отправить", command=lambda x: x)
-thrust_tenz_button.grid(row=2, column=2, padx=10, pady=5)
-
+# Макисмальный ток
 max_current_threshold_label = tk.Label(
-    settings_frame, text="Порог среднего тока\n(по умолчанию 10.0)")
-max_current_threshold_label.grid(row=3, column=0, padx=10, pady=5, sticky='e')
+    settings_frame, text="Порог среднего тока\n(по умолчанию 90.0)")
+max_current_threshold_label.grid(row=0, column=0, padx=10, pady=5, sticky='e')
 
 max_current_threshold_entry = tk.Entry(settings_frame)
-max_current_threshold_entry.insert(0, "10.0")  # Значение по умолчанию
-max_current_threshold_entry.grid(row=3, column=1, padx=10, pady=5, sticky='ew')
+max_current_threshold_entry.insert(0, "90.0")  # Значение по умолчанию
+max_current_threshold_entry.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
 
 max_current_threshold_button = ttk.Button(
     settings_frame, text="Установить", command=set_max_current_threshold)
-max_current_threshold_button.grid(row=3, column=2, padx=10, pady=5)
+max_current_threshold_button.grid(row=0, column=2, padx=10, pady=5)
+
+# Настройки lopasti
+lopasti_label = tk.Label(
+    settings_frame, text="Количество лопастей\n(3 по умолчанию)")
+lopasti_label.grid(row=1, column=0, padx=10, pady=5, sticky='e')
+
+lopasti_entry = tk.Entry(settings_frame)
+lopasti_entry.insert(0, "3")  # Значение по умолчанию
+lopasti_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+
+lopasti_button = ttk.Button(
+    settings_frame, text="Установить", command=set_lopasti)
+lopasti_button.grid(row=1, column=2, padx=10, pady=5)
 
 # Позволяет полю ввода растягиваться
 settings_frame.columnconfigure(1, weight=1)
@@ -775,7 +818,7 @@ start_freeze_button = ttk.Button(
 start_freeze_button.grid(row=1, column=0, padx=10, pady=5)
 
 stop_freeze_button = ttk.Button(
-    button_frame, text="Остановить охлаждение", command=stop_test)
+    button_frame, text="Остановить охлаждение", command=emergency_stop)
 stop_freeze_button.grid(row=1, column=1, padx=10, pady=5)
 
 refresh_ports_button = ttk.Button(
@@ -794,6 +837,57 @@ console_output = scrolledtext.ScrolledText(
     main_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED)
 console_output.grid(row=6, column=0, columnspan=3,
                     padx=10, pady=10, sticky='nsew')
+
+# Консольное окно в ручном управлении
+manual_console_output = scrolledtext.ScrolledText(
+    manual_control_frame, wrap=tk.WORD, height=20, width=60, state=tk.DISABLED
+)
+manual_console_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+# Фрейм для кнопок управления
+manual_buttons_frame = tk.Frame(manual_control_frame)
+manual_buttons_frame.pack(pady=10, fill=tk.X)
+
+# Кнопки для ручного управления
+ttk.Button(
+    manual_buttons_frame,
+    text="Начать мониторинг",
+    command=start_manual_monitoring
+).pack(side=tk.LEFT, padx=10)
+
+ttk.Button(
+    manual_buttons_frame,
+    text="Завершить мониторинг",
+    command=stop_manual_monitoring
+).pack(side=tk.LEFT, padx=10)
+
+ttk.Button(
+    manual_buttons_frame,
+    text="Начать логирование",
+    command=lambda: log_to_console("Логирование начато")
+).pack(side=tk.LEFT, padx=10)
+
+ttk.Button(
+    manual_buttons_frame,
+    text="Завершить логирование",
+    command=lambda: log_to_console("Логирование завершено")
+).pack(side=tk.LEFT, padx=10)
+
+
+def hide_test_elements_on_manual_tab(event):
+    global manual_frame
+    """Скрыть элементы теста (main_frame и его содержимое), если активна вкладка 'Ручное управление'."""
+    if notebook.tab(notebook.select(), "text") == "Ручное управление":
+        main_frame.pack_forget()  # Полностью скрываем основной фрейм
+        manual_frame = True
+    else:
+        main_frame.pack(expand=True, fill=tk.BOTH)  # Восстанавливаем основной фрейм
+        manual_frame = False
+
+
+# Привязка события переключения вкладок
+notebook.bind("<<NotebookTabChanged>>", hide_test_elements_on_manual_tab)
+hide_test_elements_on_manual_tab(None)
 
 main_frame.columnconfigure(2, weight=1)  # Позволяет кнопкам растягиваться
 # Позволяет консольному окну растягиваться

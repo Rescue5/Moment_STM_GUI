@@ -23,14 +23,13 @@ class DMCLIHandler:
         :param real_time: Если True, вывод команды записывается в реальном времени.
         :return: Код завершения команды.
         """
-        command = ["dm-cli"] + args
+        command = ["dm-cli.exe"] + args
 
         # Добавляем "./" для Unix-платформ
         if platform.system() != "Windows":
-            command[0] = f"./{command[0]}"
+            command[0] = f"./dm-cli"
 
         try:
-
             self.active_process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
@@ -74,14 +73,17 @@ class DMCLIHandler:
         else:
             self.log("Нет активного процесса для прерывания.")
 
-    def run_test(self, port, pulse_max, script):
+    def run_test(self, port, pulse_max, pulse_min, script, lopasti):
         """
         Запускает тест с использованием dm-cli.
+        :param pulse_min:
+        :param lopasti: Колличество лопастей
         :param port: Порт для подключения.
         :param pulse_max: Значение pulseMax для теста.
         :param script: Название скрипта для выполнения.
         """
-        args = ["test", "--args", f"pulseMax={pulse_max}", "--port", port, script]
+        args = ["test", "--args", f"pulseMax={pulse_max}", "--args", f"pulseMin={pulse_min}", "--args", f"lopasti={lopasti}", "--port", port, script]
+        print(args)
         self.run_command(args)
 
     def connect_to_stand(self, port, script):
