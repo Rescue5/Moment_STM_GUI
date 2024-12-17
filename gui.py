@@ -39,6 +39,8 @@ tests_folder = os.path.join(project_root, 'tests')
 lua_folder = os.path.join(project_root, 'lua')
 
 manual_frame = False
+settings_frame = False
+test_frame_active = True
 
 stop_event = threading.Event()
 command_queue = queue.Queue()
@@ -84,6 +86,7 @@ lopasti = 3
 
 pulse_min = 800
 pulse_max = 2200
+test_percent = 10
 
 
 def parse_and_save_to_csv(data):
@@ -258,19 +261,26 @@ def connect_to_stand():
 
 def log_to_console(message):
     """Вывод сообщения в консольное окно и в stdout для отладки с временной меткой."""
-    global manual_frame
-    if not manual_frame:
+    global manual_frame, test_frame_active, settings_frame
+
+    if settings_frame:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        console_output.config(state=tk.NORMAL)
-        console_output.insert(tk.END, f"[{timestamp}] {message}\n")
-        console_output.yview(tk.END)
-        console_output.config(state=tk.DISABLED)
-    else:
+        settings_console_output.config(state=tk.NORMAL)
+        settings_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        settings_console_output.yview(tk.END)
+        settings_console_output.config(state=tk.DISABLED)
+    elif manual_frame:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         manual_console_output.config(state=tk.NORMAL)
         manual_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
         manual_console_output.yview(tk.END)
         manual_console_output.config(state=tk.DISABLED)
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        test_console_output.config(state=tk.NORMAL)
+        test_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        test_console_output.yview(tk.END)
+        test_console_output.config(state=tk.DISABLED)
     # Также выводим в стандартный вывод для отладки
     print(f"[{timestamp}] {message}")
 
@@ -394,7 +404,7 @@ def start_test():
                 log_to_console(f"Ошибка при удалении существующих файлов: {e}")
                 return
 
-    test_target_speed = pulse_max
+    test_target_speed = pulse_min + test_percent*10
     log_to_console(f"Целевая скорость установлена на {test_target_speed} RPM.")
 
     reset_progress_bar()
@@ -409,7 +419,7 @@ def start_test():
     # Запускаем dm-cli в отдельном потоке
     script = os.path.join(lua_folder, "moment_test.lua")
     test_thread = threading.Thread(
-        target=dm_cli_handler.run_test, args=(port, pulse_max, pulse_min, script, lopasti), daemon=True
+        target=dm_cli_handler.run_test, args=(port, test_target_speed, pulse_min, script, lopasti), daemon=True
     )
     test_thread.start()
 
@@ -605,13 +615,29 @@ def set_lopasti():
 def update_pulse_values():
     """Обновляет значения pulse_min и pulse_max на основе положения ползунков."""
     global pulse_min, pulse_max
+
+    # Получаем текущие значения ползунков
     new_min = speed_min_percent_slider.get()
     new_max = speed_max_percent_slider.get()
 
-    # Логика, чтобы минимальное значение не превышало максимального
-    if new_min > new_max:
-        speed_min_percent_slider.set(new_max)  # Синхронизируем минимальный ползунок
-        new_min = new_max
+    # Если разница меньше или больше 1000, корректируем значения
+    if (new_max - new_min) != 1000:
+        if new_min + 1000 <= 2200:  # Если максимум не выходит за пределы
+            new_max = new_min + 1000
+        elif new_max - 1000 >= 800:  # Если минимум не выходит за пределы
+            new_min = new_max - 1000
+
+    # Устанавливаем значения с учетом границ
+    if new_min < 800:
+        new_min = 800
+        new_max = new_min + 1000
+    if new_max > 2200:
+        new_max = 2200
+        new_min = new_max - 1000
+
+    # Устанавливаем значения ползунков
+    speed_min_percent_slider.set(new_min)
+    speed_max_percent_slider.set(new_max)
 
     # Обновляем глобальные переменные
     pulse_min = new_min
@@ -681,19 +707,21 @@ def stop_manual_monitoring():
         log_to_console("Мониторинг не запущен.")
 
 def update_frame(event):
-    global manual_frame
+    global manual_frame, settings_frame, test_frame_active
     """Скрыть элементы теста (main_frame и его содержимое), если активна вкладка 'Ручное управление'."""
     if notebook.tab(notebook.select(), "text") == "Ручное управление":
-        main_frame.pack_forget()
         manual_frame = True
-    elif notebook.tab(notebook.select(), "text") != "Тест":
-        main_frame.pack_forget()
+        settings_frame = False
+        test_frame_active = False
+    elif notebook.tab(notebook.select(), "text") == "Тест":
         manual_frame = False
-        if notebook.tab(notebook.select(), "text") == "Двигатели":
-            update_motor_list()
-    else:
-        main_frame.pack(expand=True, fill=tk.BOTH)
+        settings_frame = False
+        test_frame_active = True
+    elif notebook.tab(notebook.select(), "text") == "Настройки":
         manual_frame = False
+        settings_frame = True
+        test_frame_active = False
+
 
 
 def add_motor():
@@ -748,7 +776,7 @@ notebook = ttk.Notebook(root)
 notebook.pack(expand=True, fill=tk.BOTH)
 
 # Вкладка с тестом
-test_frame = tk.Frame(notebook)
+test_frame = tk.Frame(notebook)  # Устанавливаем фон для test_frame
 notebook.add(test_frame, text="Тест")
 
 # Вкладка с настройками
@@ -763,9 +791,9 @@ notebook.add(manual_control_frame, text="Ручное управление")
 motors_frame = tk.Frame(notebook)
 notebook.add(motors_frame, text="Двигатели")
 
-# Создаем основную рамку для размещения элементов
-main_frame = tk.Frame(root, padx=10, pady=10)
-main_frame.pack(expand=True, fill=tk.BOTH)
+# # Создаем основную рамку для размещения элементов
+# main_frame = tk.Frame(root, padx=10, pady=10)
+# main_frame.pack(expand=True, fill=tk.BOTH)
 
 # Поля для ввода названия двигателя и пропеллера в тестовой вкладке
 input_frame = tk.Frame(test_frame)
@@ -793,12 +821,34 @@ except FileNotFoundError:
 
 input_frame.columnconfigure(1, weight=1)
 
+def update_test_percent():
+    global test_percent
+    test_percent = test_percent_slider.get()
+    log_to_console(f"Процент разгона: {test_percent}")
+
+# Ползунок для процента разгона
+test_percent_label = tk.Label(test_frame, text="Процент разгона")
+test_percent_label.grid(row=1, column=0, padx=10, pady=5, sticky='w')
+
+test_percent_slider = tk.Scale(
+    test_frame,
+    from_=10,  # Начальное значение
+    to=100,  # Максимальное значение
+    orient=tk.HORIZONTAL,
+    length=300,
+    resolution=10,  # Шаг изменения
+    tickinterval=10,  # Интервал для отметок
+    command=lambda _: update_test_percent()
+)
+test_percent_slider.set(test_percent)  # Устанавливаем начальное значение
+test_percent_slider.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+
 # Ползунок для максимального значения
-speed_max_percent_label = tk.Label(test_frame, text="Максимальное значение ШИМ:")
-speed_max_percent_label.grid(row=1, column=0, padx=10, pady=5, sticky='w')
+speed_max_percent_label = tk.Label(settings_frame, text="Максимальное значение ШИМ:")
+speed_max_percent_label.grid(row=4, column=0, padx=10, pady=5, sticky='w')
 
 speed_max_percent_slider = tk.Scale(
-    test_frame,
+    settings_frame,
     from_=800,  # Начальное значение
     to=2200,  # Максимальное значение
     orient=tk.HORIZONTAL,
@@ -808,14 +858,14 @@ speed_max_percent_slider = tk.Scale(
     command=lambda _: update_pulse_values()
 )
 speed_max_percent_slider.set(pulse_max)  # Устанавливаем начальное значение
-speed_max_percent_slider.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+speed_max_percent_slider.grid(row=4, column=1, padx=10, pady=5, sticky='ew')
 
 # Ползунок для минимального значения
-speed_min_percent_label = tk.Label(test_frame, text="Минимальное значение ШИМ:")
-speed_min_percent_label.grid(row=2, column=0, padx=10, pady=5, sticky='w')
+speed_min_percent_label = tk.Label(settings_frame, text="Минимальное значение ШИМ:")
+speed_min_percent_label.grid(row=5, column=0, padx=10, pady=5, sticky='w')
 
 speed_min_percent_slider = tk.Scale(
-    test_frame,
+    settings_frame,
     from_=800,  # Начальное значение
     to=2200,  # Максимальное значение
     orient=tk.HORIZONTAL,
@@ -825,7 +875,7 @@ speed_min_percent_slider = tk.Scale(
     command=lambda _: update_pulse_values()
 )
 speed_min_percent_slider.set(pulse_min)  # Устанавливаем начальное значение
-speed_min_percent_slider.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
+speed_min_percent_slider.grid(row=5, column=1, padx=10, pady=5, sticky='ew')
 
 # Прогресс бар и метка
 progress_frame = tk.Frame(test_frame)
@@ -891,7 +941,7 @@ lopasti_button.grid(row=1, column=2, padx=10, pady=5)
 
 settings_frame.columnconfigure(1, weight=1)
 
-button_frame = tk.Frame(main_frame)
+button_frame = tk.Frame(test_frame)
 button_frame.grid(row=5, column=0, columnspan=3,
                   pady=(10, 0), sticky='ew', padx=10)
 
@@ -922,15 +972,21 @@ instruction_label = tk.Label(
 instruction_label.grid(row=2, column=0, columnspan=3,
                        padx=10, pady=5, sticky='w')
 
-# Консольное окно
-console_output = scrolledtext.ScrolledText(
-    main_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED)
-console_output.grid(row=6, column=0, columnspan=3,
+# Консольное окно в тест
+test_console_output = scrolledtext.ScrolledText(
+    test_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED)
+test_console_output.grid(row=6, column=0, columnspan=3,
+                    padx=10, pady=10, sticky='nsew')
+
+# Консольное окно в настройках
+settings_console_output = scrolledtext.ScrolledText(
+    settings_frame, wrap=tk.WORD, height=30, width=60, state=tk.DISABLED)
+settings_console_output.grid(row=6, column=0, columnspan=3,
                     padx=10, pady=10, sticky='nsew')
 
 # Консольное окно в ручном управлении
 manual_console_output = scrolledtext.ScrolledText(
-    manual_control_frame, wrap=tk.WORD, height=20, width=60, state=tk.DISABLED
+    manual_control_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED
 )
 manual_console_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
@@ -988,6 +1044,7 @@ kv_entry.grid(row=2, column=1, padx=5, pady=5, sticky='ew')
 add_motor_frame.columnconfigure(1, weight=1)
 
 add_motor_button = ttk.Button(add_motor_frame, text="Добавить двигатель", command=add_motor)
+# add_motor_button = ttk.Button(add_motor_frame, text="Добавить двигатель", command=lambda x:x)
 add_motor_button.grid(row=3, column=0, columnspan=2, pady=10)
 
 # Список двигателей
@@ -1002,6 +1059,7 @@ motors_list_label = tk.Label(header_frame, text="Список двигателе
 motors_list_label.pack(side=tk.LEFT, padx=5, pady=(0, 5))
 
 refresh_motor_button = ttk.Button(header_frame, text="Обновить список", command=update_motor_list)
+# refresh_motor_button = ttk.Button(header_frame, text="Обновить список", command=lambda x:x)
 refresh_motor_button.pack(side=tk.LEFT, padx=5, pady=(0, 5))
 
 # Список двигателей
@@ -1009,13 +1067,119 @@ motors_listbox = tk.Listbox(motors_list_frame, height=15)
 motors_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
 delete_motor_button = ttk.Button(motors_list_frame, text="Удалить двигатель", command=delete_motor)
+# delete_motor_button = ttk.Button(motors_list_frame, text="Удалить двигатель", command=lambda x:x)
 delete_motor_button.pack(pady=5)
 
+#
+# ВКЛАДКА С ПРОПЕЛЛЛЕРАМИ
+#
+def add_propeller():
+    producer = propeller_producer_entry.get()
+    diameter = diameter_entry.get()
+    pitch = pitch_entry.get()
+    blades = blade_entry.get()
 
-main_frame.columnconfigure(2, weight=1)
+    if not producer or not diameter.isdigit() or not pitch.isdigit() or not blades.isdigit():
+        log_to_console("Ошибка: Проверьте корректность введённых данных!")
+        return
+
+    db_message = db_manager.add_propeller(producer, int(diameter), int(pitch), int(blades))
+    log_to_console(db_message)
+    update_propeller_list()
+
+    propeller_producer_entry.delete(0, tk.END)
+    diameter_entry.delete(0, tk.END)
+    pitch_entry.delete(0, tk.END)
+    blade_entry.delete(0,tk.END)
+
+
+def update_propeller_list():
+    """Обновляет список двигателей из базы данных"""
+    propellers_listbox.delete(0, tk.END)  # Очистить список
+    propellers = db_manager.get_all_propellers()
+    for propeller in propellers:
+        propellers_listbox.insert(tk.END, f"{propeller.producer}, {propeller.diameter}, {propeller.pitch}, {propeller.blades}")
+
+
+def delete_propeller():
+    """Удаляет выбранный двигатель из базы данных"""
+    try:
+        selection = propellers_listbox.get(propellers_listbox.curselection())
+        producer = (selection.split(",")[0]).strip(' ')
+        diameter = float((selection.split(",")[1]).strip(' '))
+        pitch = float((selection.split(",")[2]).strip(' '))
+        blades = int((selection.split(",")[3]).strip(' '))
+
+    except Exception as e:
+        print(e)
+        messagebox.showerror("Ошибка", "Пожалуйста, выберите пропеллер для удаления.")
+        return
+    answer = messagebox.askyesno("Подтверждение", f"Вы уверены, что хотите удалить пропеллер {producer} {diameter}x{pitch}x{blades}?")
+    if answer:
+        db_message = db_manager.delete_propeller(producer, diameter, pitch, blades)
+        print(db_message)
+        update_propeller_list()
+
+propeller_frame = tk.Frame(notebook)
+notebook.add(propeller_frame, text="Пропеллеры")
+
+# Поля для добавления пропеллера
+add_propeller_frame = tk.Frame(propeller_frame, padx=10, pady=10)
+add_propeller_frame.pack(fill=tk.X, pady=(0, 10))
+
+propeller_producer_label = tk.Label(add_propeller_frame, text="Производитель:")
+propeller_producer_label.grid(row=0, column=0, padx=5, pady=5, sticky='w')
+propeller_producer_entry = tk.Entry(add_propeller_frame)
+propeller_producer_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+
+diameter_label = tk.Label(add_propeller_frame, text="Диаметр:")
+diameter_label.grid(row=1, column=0, padx=5, pady=5, sticky='w')
+diameter_entry = tk.Entry(add_propeller_frame)
+diameter_entry.grid(row=1, column=1, padx=5, pady=5, sticky='ew')
+
+pitch_label = tk.Label(add_propeller_frame, text="Шаг:")
+pitch_label.grid(row=2, column=0, padx=5, pady=5, sticky='w')
+pitch_entry = tk.Entry(add_propeller_frame)
+pitch_entry.grid(row=2, column=1, padx=5, pady=5, sticky='ew')
+
+blade_label = tk.Label(add_propeller_frame, text="Лопасти:")
+blade_label.grid(row=3, column=0, padx=5, pady=5, sticky='w')
+blade_entry = tk.Entry(add_propeller_frame)
+blade_entry.grid(row=3, column=1, padx=5, pady=5, sticky='ew')
+
+add_propeller_frame.columnconfigure(1, weight=1)
+
+add_propeller_button = ttk.Button(add_propeller_frame, text="Добавить пропеллер", command=add_propeller)
+# add_propeller_button = ttk.Button(add_propeller_frame, text="Добавить пропеллер", command=lambda x:x)
+add_propeller_button.grid(row=4, column=0, columnspan=2, pady=10)
+
+# Список пропеллеров
+propellers_list_frame = tk.Frame(propeller_frame, padx=10, pady=10)
+propellers_list_frame.pack(fill=tk.BOTH, expand=True)
+
+# Обновляемая строка с меткой и кнопкой
+propeller_header_frame = tk.Frame(propellers_list_frame)
+propeller_header_frame.pack(fill=tk.X)
+
+propellers_list_label = tk.Label(propeller_header_frame, text="Список пропеллеров:")
+propellers_list_label.pack(side=tk.LEFT, padx=5, pady=(0, 5))
+
+refresh_propeller_button = ttk.Button(propeller_header_frame, text="Обновить список", command=update_propeller_list)
+# refresh_propeller_button = ttk.Button(propeller_header_frame, text="Обновить список", command=lambda x:x)
+refresh_propeller_button.pack(side=tk.LEFT, padx=5, pady=(0, 5))
+
+# Список пропеллеров
+propellers_listbox = tk.Listbox(propellers_list_frame, height=15)
+propellers_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+delete_propeller_button = ttk.Button(propellers_list_frame, text="Удалить пропеллер", command=delete_propeller)
+# delete_propeller_button = ttk.Button(propellers_list_frame, text="Удалить пропеллер", command=lambda x:x)
+delete_propeller_button.pack(pady=5)
+
+test_frame.columnconfigure(2, weight=1)
 
 # Позволяет консольному окну растягиваться
-main_frame.rowconfigure(6, weight=1)
+test_frame.rowconfigure(6, weight=1)
 
 # Закрытие приложения
 root.protocol("WM_DELETE_WINDOW", close_application)

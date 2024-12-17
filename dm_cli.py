@@ -29,12 +29,18 @@ class DMCLIHandler:
         # Добавляем "./" для Unix-платформ
         if platform.system() != "Windows":
             command[0] = f"./dm-cli"
-            # FIXME: Вернуть поддержку под линукс и макос
+            command[10] = f"lua/{command[10].split("/")[-1]}"
+            print(command)
+            # FIXME:Вернуть поддержку под линукс и макос
 
         try:
-            self.active_process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True, encoding='utf-8', errors='replace'
-            )
+            if platform.system() == "Windows":
+                self.active_process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True, encoding='utf-8', errors='replace'
+                )
+            else:
+                self.active_process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
             if real_time:
                 # Читаем вывод команды в реальном времени
