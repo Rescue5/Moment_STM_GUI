@@ -1,5 +1,6 @@
 import subprocess
 import platform
+import psutil
 
 class DMCLIHandler:
     """Класс для управления взаимодействием с dm-cli."""
@@ -28,10 +29,11 @@ class DMCLIHandler:
         # Добавляем "./" для Unix-платформ
         if platform.system() != "Windows":
             command[0] = f"./dm-cli"
+            # FIXME: Вернуть поддержку под линукс и макос
 
         try:
             self.active_process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True, encoding='utf-8', errors='replace'
             )
 
             if real_time:
@@ -64,9 +66,18 @@ class DMCLIHandler:
     def stop_command(self):
         """Прерывает выполнение текущей команды dm-cli."""
         if self.active_process:
-            if self.active_process.poll() is None:
-                self.log("Прерывание процесса dm-cli.")
-                self.active_process.terminate()
+            if self.active_process.poll() is None:  # Процесс все еще активен
+                self.log(f"Прерывание процесса dm-cli с PID {self.active_process.pid}...")
+
+                try:
+                    process = psutil.Process(self.active_process.pid)
+                    for child in process.children(recursive=True):  # Убиваем всех детей
+                        self.log(f"Убийство дочернего процесса PID {child.pid}")
+                        child.terminate()
+                    process.terminate()  # Убиваем основной процесс
+                    process.wait(timeout=3)  # Ждем завершения процесса
+                except Exception as e:
+                    self.log(f"Ошибка при остановке процесса: {e}")
             else:
                 self.log("Процесс dm-cli уже завершен.")
             self.active_process = None

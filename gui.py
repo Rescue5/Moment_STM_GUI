@@ -11,17 +11,30 @@ from ttkthemes import ThemedTk
 from tkinter import scrolledtext
 from PIL import Image, ImageTk
 import os
+import sys
 import datetime
 import subprocess
 import platform
 
 from dm_cli import DMCLIHandler
 from analyzer import analyze_rpm, analyze_current, analyze_temperature
+from DBase.db_manager import DBManager
 
+db_manager = DBManager()
 dm_cli_handler = None
+
 last_command = None
 
-project_root = os.path.dirname(os.path.abspath(__file__))
+
+def get_project_root():
+    """Возвращает путь к папке, где лежит exe или python файл."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+project_root = get_project_root()
 tests_folder = os.path.join(project_root, 'tests')
 lua_folder = os.path.join(project_root, 'lua')
 
@@ -156,7 +169,7 @@ def parse_and_save_to_csv(data):
                 current_rpm.append(rpm)
                 rpm_count += 1
 
-            if rpm_count == 5 and not manual_frame:
+            if rpm_count == 20 and not manual_frame:
                 current_avg_rpm = sum(current_rpm) / len(current_rpm)
                 log_to_console(f"Среднее RPM для скорости {current_speed}: {current_avg_rpm:.2f}")
                 analyze_rpm(current_avg_rpm, previous_avg_rpm, current_speed, previous_speed, log_to_console, stop_test)
@@ -180,32 +193,50 @@ def connect_to_stand():
     port = com_port_combobox.get()
     script = os.path.join(lua_folder, "test_conn.lua")
 
+    print(script)
+
     if not port:
         log_to_console("Выберите порт из выпадающего списка.")
         return
 
-    command = ["dm-cli.exe", "test", "--port", port, script]
+    if getattr(sys, 'frozen', False):  # Если программа собрана в exe
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        exe_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if platform.system() != "Windows":
+        dm_cli_path = os.path.join(exe_dir, 'dm-cli')
+    else:
+        dm_cli_path = os.path.join(exe_dir, 'dm-cli.exe')
+
+    print(exe_dir)
+    print(dm_cli_path)
+
+    command = [f"{dm_cli_path}", "test", "--port", port, script]
 
     if platform.system() != "Windows":
         command[0] = f"./dm-cli"
+        command[4] = f"lua/test_conn.lua"
+        print(command)
     try:
         if read_serial_thread is None or not read_serial_thread.is_alive():
             read_serial_thread = threading.Thread(
                 target=read_output, daemon=True)
             read_serial_thread.start()
-            log_to_console("Поток чтения данных запущен.")
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        if platform.system() == "Windows":
+            result = subprocess.run(command, capture_output=True, text=True, shell=True, encoding='utf-8', errors='replace')
+        else:
+            result = subprocess.run(command, capture_output=True, text=True)
 
         if result.returncode == 0:
-            log_to_console(f"Подключение к стенду успешно:\n{result.stdout}")
-
             # Ищем наименование стенда в выводе
             for line in result.stdout.splitlines():
                 if "Наименование стенда:" in line:
                     stand_name = line.split(":")[1].strip().lower()
                     update_stand_name(stand_name)  # Вызываем функцию обновления интерфейса
                     log_to_console(f"Название стенда: {stand_name}")
+                    log_to_console(f"Подключение к стенду успешно:\n{result.stdout}")
 
                     # Проверяем тип стенда
                     if stand_name in ["момент", "тяга", "шпиндель"]:
@@ -649,6 +680,63 @@ def stop_manual_monitoring():
     else:
         log_to_console("Мониторинг не запущен.")
 
+def update_frame(event):
+    global manual_frame
+    """Скрыть элементы теста (main_frame и его содержимое), если активна вкладка 'Ручное управление'."""
+    if notebook.tab(notebook.select(), "text") == "Ручное управление":
+        main_frame.pack_forget()
+        manual_frame = True
+    elif notebook.tab(notebook.select(), "text") != "Тест":
+        main_frame.pack_forget()
+        manual_frame = False
+        if notebook.tab(notebook.select(), "text") == "Двигатели":
+            update_motor_list()
+    else:
+        main_frame.pack(expand=True, fill=tk.BOTH)
+        manual_frame = False
+
+
+def add_motor():
+    producer = producer_entry.get()
+    model = model_entry.get()
+    kv = kv_entry.get()
+
+    if not producer or not model or not kv.isdigit():
+        log_to_console("Ошибка: Проверьте корректность введённых данных!")
+        return
+
+    db_message = db_manager.add_motor(producer, model, int(kv))
+    log_to_console(db_message)
+    update_motor_list()
+
+    producer_entry.delete(0, tk.END)
+    model_entry.delete(0, tk.END)
+    kv_entry.delete(0, tk.END)
+
+def update_motor_list():
+    """Обновляет список двигателей из базы данных"""
+    motors_listbox.delete(0, tk.END)  # Очистить список
+    motors = db_manager.get_all_motors()
+    for motor in motors:
+        motors_listbox.insert(tk.END, f"{motor.producer}, {motor.model_name}, {motor.kv} KV")
+
+def delete_motor():
+    """Удаляет выбранный двигатель из базы данных"""
+    try:
+        selection = motors_listbox.get(motors_listbox.curselection())
+        producer = (selection.split(",")[0]).strip(' ')
+        model = (selection.split(",")[1]).strip(' ')
+        kv = int((selection.split(",")[2]).split(" ")[1])
+    except Exception as e:
+        print(e)
+        messagebox.showerror("Ошибка", "Пожалуйста, выберите двигатель для удаления.")
+        return
+    answer = messagebox.askyesno("Подтверждение", f"Вы уверены, что хотите удалить двигатель {producer} {model} {kv}?")
+    if answer:
+        db_message = db_manager.delete_motor(producer, model, kv)
+        print(db_message)
+        update_motor_list()
+
 root = ThemedTk()
 root.get_themes()
 root.set_theme("arc")
@@ -670,6 +758,10 @@ notebook.add(settings_frame, text="Настройки")
 # Вкладка для ручного управления
 manual_control_frame = tk.Frame(notebook)
 notebook.add(manual_control_frame, text="Ручное управление")
+
+# Вкладка для двигателей
+motors_frame = tk.Frame(notebook)
+notebook.add(motors_frame, text="Двигатели")
 
 # Создаем основную рамку для размещения элементов
 main_frame = tk.Frame(root, padx=10, pady=10)
@@ -790,17 +882,15 @@ lopasti_label = tk.Label(
 lopasti_label.grid(row=1, column=0, padx=10, pady=5, sticky='e')
 
 lopasti_entry = tk.Entry(settings_frame)
-lopasti_entry.insert(0, "3")  # Значение по умолчанию
+lopasti_entry.insert(0, "3")
 lopasti_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
 
 lopasti_button = ttk.Button(
     settings_frame, text="Установить", command=set_lopasti)
 lopasti_button.grid(row=1, column=2, padx=10, pady=5)
 
-# Позволяет полю ввода растягиваться
 settings_frame.columnconfigure(1, weight=1)
 
-# Остальные кнопки управления остаются в button_frame
 button_frame = tk.Frame(main_frame)
 button_frame.grid(row=5, column=0, columnspan=3,
                   pady=(10, 0), sticky='ew', padx=10)
@@ -873,23 +963,57 @@ ttk.Button(
     command=lambda: log_to_console("Логирование завершено")
 ).pack(side=tk.LEFT, padx=10)
 
+notebook.bind("<<NotebookTabChanged>>", update_frame)
+update_frame(None)
 
-def hide_test_elements_on_manual_tab(event):
-    global manual_frame
-    """Скрыть элементы теста (main_frame и его содержимое), если активна вкладка 'Ручное управление'."""
-    if notebook.tab(notebook.select(), "text") == "Ручное управление":
-        main_frame.pack_forget()  # Полностью скрываем основной фрейм
-        manual_frame = True
-    else:
-        main_frame.pack(expand=True, fill=tk.BOTH)  # Восстанавливаем основной фрейм
-        manual_frame = False
+# Поля для добавления двигателя
+add_motor_frame = tk.Frame(motors_frame, padx=10, pady=10)
+add_motor_frame.pack(fill=tk.X, pady=(0, 10))
+
+producer_label = tk.Label(add_motor_frame, text="Производитель:")
+producer_label.grid(row=0, column=0, padx=5, pady=5, sticky='w')
+producer_entry = tk.Entry(add_motor_frame)
+producer_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+
+model_label = tk.Label(add_motor_frame, text="Модель:")
+model_label.grid(row=1, column=0, padx=5, pady=5, sticky='w')
+model_entry = tk.Entry(add_motor_frame)
+model_entry.grid(row=1, column=1, padx=5, pady=5, sticky='ew')
+
+kv_label = tk.Label(add_motor_frame, text="KV:")
+kv_label.grid(row=2, column=0, padx=5, pady=5, sticky='w')
+kv_entry = tk.Entry(add_motor_frame)
+kv_entry.grid(row=2, column=1, padx=5, pady=5, sticky='ew')
+
+add_motor_frame.columnconfigure(1, weight=1)
+
+add_motor_button = ttk.Button(add_motor_frame, text="Добавить двигатель", command=add_motor)
+add_motor_button.grid(row=3, column=0, columnspan=2, pady=10)
+
+# Список двигателей
+motors_list_frame = tk.Frame(motors_frame, padx=10, pady=10)
+motors_list_frame.pack(fill=tk.BOTH, expand=True)
+
+# Обновляемая строка с меткой и кнопкой
+header_frame = tk.Frame(motors_list_frame)
+header_frame.pack(fill=tk.X)
+
+motors_list_label = tk.Label(header_frame, text="Список двигателей:")
+motors_list_label.pack(side=tk.LEFT, padx=5, pady=(0, 5))
+
+refresh_motor_button = ttk.Button(header_frame, text="Обновить список", command=update_motor_list)
+refresh_motor_button.pack(side=tk.LEFT, padx=5, pady=(0, 5))
+
+# Список двигателей
+motors_listbox = tk.Listbox(motors_list_frame, height=15)
+motors_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+delete_motor_button = ttk.Button(motors_list_frame, text="Удалить двигатель", command=delete_motor)
+delete_motor_button.pack(pady=5)
 
 
-# Привязка события переключения вкладок
-notebook.bind("<<NotebookTabChanged>>", hide_test_elements_on_manual_tab)
-hide_test_elements_on_manual_tab(None)
+main_frame.columnconfigure(2, weight=1)
 
-main_frame.columnconfigure(2, weight=1)  # Позволяет кнопкам растягиваться
 # Позволяет консольному окну растягиваться
 main_frame.rowconfigure(6, weight=1)
 
