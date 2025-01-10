@@ -2,9 +2,9 @@ import subprocess
 import platform
 import psutil
 
+
 class DMCLIHandler:
     """Класс для управления взаимодействием с dm-cli."""
-
     def __init__(self, log_callback):
         """
         :param log_callback: Функция для логирования (например, log_to_console).
@@ -29,9 +29,8 @@ class DMCLIHandler:
         # Добавляем "./" для Unix-платформ
         if platform.system() != "Windows":
             command[0] = f"./dm-cli"
-            command[10] = f"lua/{command[10].split("/")[-1]}"
+            command[16] = f"lua/{command[16].split("/")[-1]}"
             print(command)
-            # FIXME:Вернуть поддержку под линукс и макос
 
         try:
             if platform.system() == "Windows":
@@ -90,7 +89,7 @@ class DMCLIHandler:
         else:
             self.log("Нет активного процесса для прерывания.")
 
-    def run_test(self, port, pulse_max, pulse_min, script, lopasti):
+    def run_test(self, port, pulse_max, pulse_min, script, lopasti, tenz1, tenz2, tenz3):
         """
         Запускает тест с использованием dm-cli.
         :param pulse_min:
@@ -99,7 +98,15 @@ class DMCLIHandler:
         :param pulse_max: Значение pulseMax для теста.
         :param script: Название скрипта для выполнения.
         """
-        args = ["test", "--args", f"pulseMax={pulse_max}", "--args", f"pulseMin={pulse_min}", "--args", f"lopasti={lopasti}", "--port", port, script]
+        args = [
+                "test",
+                "--args", f"pulseMax={pulse_max}",
+                "--args", f"pulseMin={pulse_min}",
+                "--args", f"tenz1={tenz1}",
+                "--args", f"tenz2={tenz2}",
+                "--args", f"tenz3={tenz3}",
+                "--args", f"lopasti={lopasti}",
+                "--port", port, script]
         print(args)
         self.run_command(args)
 

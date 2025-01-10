@@ -2,8 +2,8 @@ local tag = 'idle'
 local lastTele = {}
 
 -- Коэффициенты масштабирования для тензодатчиков
--- local scaleFactors = {-220.4, -490510.5, -474912.8} -- По умолчанию установлены коэффициенты 1
-local scaleFactors = {-430.468, -868021, -474912.8} -- По умолчанию установлены коэффициенты 1
+--local scaleFactors = {-430.468, -868021, -474912.8} -- По умолчанию установлены коэффициенты 1
+local scaleFactors = {0, 0, 0} -- По умолчанию установлены коэффициенты 1
 local rpmcoef = 1
 
 local function setScale(index, scale)
@@ -20,31 +20,37 @@ end
 
 local function onConnect()
    local sampleRate = intParam('sampleRate', 10)
+   scaleFactors[1] = intParam('tenz1', -430.468)
+   scaleFactors[2] = intParam('tenz2', -868021)
+   scaleFactors[3] = intParam('tenz3', -474912.8)
    sample(sampleRate)
    tare()
 end
 
 -- С температурой доделать
 local function printTelemetry(t)
+   local lopasti = intParam('lopasti', 3)
+   --local moment = (applyScale(t.Load2, 2) + applyScale(t.Load3, 3)) / 2
+   local moment = applyScale(t.Load2, 2)
+   local rpm = t.MotorRPM / lopasti
+   local current = t.MotorI * 0.9514
+   local power = current * t.MotorU
+   local mech_power =  ((moment * rpm * 1000.0)/9549.0)
+   local kpd = mech_power/power
    local str = string.format(
-      'Скорость:%d:Момент:%.05f:Тяга:%.02f:Об/мин:%d:Ток:%.02f:Напряжение:%.02f:Мощность:%.02f:Температура:%.02f',
+      'Скорость:%d:Момент:%.04f:Тяга:%d:Об/мин:%d:Ток:%.02f:Напряжение:%.02f:Мощность:%.02f:Температура:%.02f:Мех.Мощность:%.02f:КПД:%.02f',
       t.Throttle,
-      applyScale(t.Load2, 2), -- момент
-      applyScale(t.Load1, 1), -- Тяга
-      t.MotorRPM / 3,
-      t.MotorI,
+      moment,
+      applyScale(t.Load1, 1),
+      rpm,
+      current,
       t.MotorU,
-      t.MotorP,
-      t.Temp1
-
+      power,
+      t.Temp1,
+      mech_power,
+      kpd
    )
    print(str)
-end
-
-local function onConnect()
-   local sampleRate = intParam('sampleRate', 10)
-   sample(sampleRate)
-   tare()
 end
 
 
@@ -86,7 +92,7 @@ end
 
 --------------------------------------------------------------------------------
 
-local function test()
+local function test(t)
    -- Вызов режима охлаждения
    coolingMode()
 end
@@ -98,4 +104,5 @@ return {
    OnConnect    = onConnect,
    OnTelemetry  = onTelemetry,
    OnDisconnect = onDisconnect,
+   SetScale     = setScale,
 }

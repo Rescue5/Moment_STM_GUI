@@ -15,10 +15,11 @@ import sys
 import datetime
 import subprocess
 import platform
+import json
 
 from dm_cli import DMCLIHandler
-from analyzer import analyze_rpm, analyze_current, analyze_temperature
 from DBase.db_manager import DBManager
+from analysis.analyser import analyze_DB, analyze_rpm, analyze_current, analyze_temperature
 
 db_manager = DBManager()
 dm_cli_handler = None
@@ -81,8 +82,22 @@ read_serial_thread = None  # Поток чтения данных
 log_file = None
 csv_file = None
 log_file_lock = threading.Lock()
+test_pk = None
 
-lopasti = 3
+test = False
+freeze = False
+
+#
+# Переменные конфигурации
+#
+CONFIG_FILE = 'config.json'
+with open(CONFIG_FILE, 'r') as config_file:
+    config = json.load(config_file)
+
+lopasti = config['lopasti']
+tenz1 = config['tenz1']
+tenz2 = config['tenz2']
+tenz3 = config['tenz3']
 
 pulse_min = 800
 pulse_max = 2200
@@ -95,6 +110,11 @@ def parse_and_save_to_csv(data):
     global current_avg_rpm, previous_avg_rpm, rpm_count
     global test_target_speed, progress_complete
     global rpm_received, current_speed_check
+    global test_pk
+
+    if "Motor stopped" in data or "Test complete" in data:
+        print("Тест был завершен штатно")
+        stop_test()
 
     if data.startswith("Speed set to:"):
         parts = data.split(":")
@@ -128,6 +148,23 @@ def parse_and_save_to_csv(data):
             else:
                 log_to_console("Неизвестный тип стенда.")
                 return
+            print("начинаю загрузку в БД")
+            try:
+                response = db_manager.add_test_row(test_id_fk=test_pk,
+                                                   throttle=speed,
+                                                   moment=moment,
+                                                   thrust=thrust,
+                                                   rpm=rpm,
+                                                   current=current,
+                                                   voltage=voltage,
+                                                   power=power,
+                                                   temperature=temperature,
+                                                   mech_power=mech_power,
+                                                   efficiency=kpd)
+                print(f"Ответ БД: {response}")
+            except Exception as e:
+                print(f"Ошибка при загрузке в БД: {e}")
+            print("загрузка завершена")
 
             write_headers = False
             if test_running.is_set() and csv_file:
@@ -135,13 +172,13 @@ def parse_and_save_to_csv(data):
                     write_headers = True
                 elif os.path.getsize(csv_file) == 0:
                     write_headers = True
-
                 with log_file_lock:
                     with open(csv_file, 'a', newline='') as csvfile:
                         csv_writer = csv.writer(csvfile, delimiter=';')
                         if write_headers:
                             csv_writer.writerow(
-                                ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power", "Temperature", "Mech.Power", "KPD"])
+                                ["Speed", "Moment", "Thrust", "RPM", "Current", "Voltage", "Power", "Temperature",
+                                 "Mech.Power", "KPD"])
                         csv_writer.writerow([
                             str(speed).replace('.', ','),
                             str(moment).replace('.', ',') if moment is not None else "",
@@ -183,7 +220,8 @@ def parse_and_save_to_csv(data):
 
             if temperature is not None and not manual_frame:
                 temperature_values.append(temperature)
-                analyze_temperature(temperature_values, current_speed, log_to_console, stop_test, max_temperature_threshold)
+                analyze_temperature(temperature_values, current_speed, log_to_console, stop_test,
+                                    max_temperature_threshold)
 
         except (IndexError, ValueError) as e:
             log_to_console(f"Ошибка парсинга данных: {data} | Ошибка: {e}")
@@ -228,7 +266,8 @@ def connect_to_stand():
             read_serial_thread.start()
 
         if platform.system() == "Windows":
-            result = subprocess.run(command, capture_output=True, text=True, shell=True, encoding='utf-8', errors='replace')
+            result = subprocess.run(command, capture_output=True, text=True, shell=True, encoding='utf-8',
+                                    errors='replace')
         else:
             result = subprocess.run(command, capture_output=True, text=True)
 
@@ -237,7 +276,6 @@ def connect_to_stand():
             for line in result.stdout.splitlines():
                 if "Наименование стенда:" in line:
                     stand_name = line.split(":")[1].strip().lower()
-                    update_stand_name(stand_name)  # Вызываем функцию обновления интерфейса
                     log_to_console(f"Название стенда: {stand_name}")
                     log_to_console(f"Подключение к стенду успешно:\n{result.stdout}")
 
@@ -263,6 +301,9 @@ def log_to_console(message):
     """Вывод сообщения в консольное окно и в stdout для отладки с временной меткой."""
     global manual_frame, test_frame_active, settings_frame
 
+    if "Motor stopped" in message:
+        stop_test()
+
     if settings_frame:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         settings_console_output.config(state=tk.NORMAL)
@@ -271,10 +312,10 @@ def log_to_console(message):
         settings_console_output.config(state=tk.DISABLED)
     elif manual_frame:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        manual_console_output.config(state=tk.NORMAL)
-        manual_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
-        manual_console_output.yview(tk.END)
-        manual_console_output.config(state=tk.DISABLED)
+        # manual_console_output.config(state=tk.NORMAL)
+        # manual_console_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        # manual_console_output.yview(tk.END)
+        # manual_console_output.config(state=tk.DISABLED)
     else:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         test_console_output.config(state=tk.NORMAL)
@@ -294,11 +335,14 @@ def read_output():
             try:
                 line = dm_cli_handler.active_process.stdout.readline()
                 if not line:
-                    break
+                    continue
                 data = line.strip()
                 log_to_console(data)
 
-                    # Записываем в лог-файл, если тест запущен
+                if "Motor stopped" in data or "Test complete" in data:
+                    print("Тест был завершен штатно")
+                    stop_test()
+
                 if test_running.is_set() and log_file and csv_file:
                     with log_file_lock:
                         try:
@@ -311,24 +355,10 @@ def read_output():
                 if data.startswith("Скорость:") or data.startswith("Speed set to:"):
                     parse_and_save_to_csv(data)
 
-                # Проверяем, завершен ли тест
-                if "Motor stopped" in data or "Test complete" in data:
-                    log_to_console("Тест завершен или двигатель остановлен.")
-                    previous_rpm.clear()
-                    current_rpm.clear()
-                    current_speed = None
-                    current_speed_check = 0
-                    rpm_received = False
-                    previous_speed = None
-                    test_running.clear()
-                    reset_test_state()
-                    reset_progress_bar()
-
                 # Проверяем название стенда
                 if data.startswith("Наименование стенда:"):
                     try:
                         stand_name = data.split(":")[1].strip().lower()
-                        update_stand_name(stand_name)
                         log_to_console(f"Название стенда: {stand_name}")
                         if stand_name in ["пропеллер", "момент", "шпиндель"]:
                             instruction_label.config(
@@ -341,9 +371,8 @@ def read_output():
                         log_to_console("Не удалось извлечь название стенда.")
             except Exception as e:
                 continue
-                # log_to_console(f"Ошибка чтения данных из dm-cli: {e}")
         else:
-            time.sleep(1)  # Ждем процесса dm-cli
+            time.sleep(1)
 
 
 def start_test():
@@ -352,6 +381,8 @@ def start_test():
         previous_avg_rpm, current_avg_rpm, rpm_count, test_target_speed, progress_complete, dm_cli_handler
     global dm_cli_handler, read_serial_thread, process_commands_thread, lopasti
     global pulse_max, pulse_min
+    global tenz1, tenz2, tenz3
+    global test_pk, test, freeze
 
     reset_test_state()
     # Сбрасываем состояния
@@ -366,9 +397,11 @@ def start_test():
         read_serial_thread = threading.Thread(target=read_output, daemon=True)
         read_serial_thread.start()
 
-    propeller_name = propeller_name_entry.get()
+    propeller_name = propeller_combobox.get()
+    split_propeller = propeller_name.split(' ')
     if stand_name != 'шпиндель':
-        engine_name = engine_name_entry.get()
+        engine_name = engine_combobox.get()
+        split_engine = engine_name.split(' ')
     else:
         engine_name = 'shpindel'
 
@@ -376,9 +409,15 @@ def start_test():
         log_to_console("Введите названия двигателя и пропеллера.")
         return
 
+    propeller_id = db_manager.get_propeller_id(split_propeller[0], split_propeller[1], split_propeller[2],
+                                               split_propeller[3])
+    engine_id = db_manager.get_motor_id(split_engine[0], split_engine[1], split_engine[2])
+
+    test_pk = db_manager.create_test_record(engine_id, propeller_id)
+
     # Составляем имена файлов для логов и CSV
-    log_file = os.path.join(tests_folder,  f"{engine_name}_{propeller_name}_log.txt")
-    csv_file = os.path.join(tests_folder,  f"{engine_name}_{propeller_name}_data.csv")
+    log_file = os.path.join(tests_folder, f"{engine_name}_{propeller_name}_log.txt")
+    csv_file = os.path.join(tests_folder, f"{engine_name}_{propeller_name}_data.csv")
 
     # Проверяем, существуют ли уже файлы с таким именем
     if os.path.exists(log_file) or os.path.exists(csv_file):
@@ -404,7 +443,7 @@ def start_test():
                 log_to_console(f"Ошибка при удалении существующих файлов: {e}")
                 return
 
-    test_target_speed = pulse_min + test_percent*10
+    test_target_speed = pulse_min + test_percent * 10
     log_to_console(f"Целевая скорость установлена на {test_target_speed} RPM.")
 
     reset_progress_bar()
@@ -419,18 +458,20 @@ def start_test():
     # Запускаем dm-cli в отдельном потоке
     script = os.path.join(lua_folder, "moment_test.lua")
     test_thread = threading.Thread(
-        target=dm_cli_handler.run_test, args=(port, test_target_speed, pulse_min, script, lopasti), daemon=True
+        target=dm_cli_handler.run_test, args=(port, test_target_speed, pulse_min, script, lopasti, tenz1, tenz2, tenz3),
+        daemon=True
     )
     test_thread.start()
 
     # Устанавливаем флаг теста
+    test = True
     test_running.set()
     log_to_console("Запуск теста завершен.")
 
 
 def stop_test():
     """Остановка теста или охлаждения."""
-    global dm_cli_handler, test_running, read_serial_thread, process_commands_thread
+    global dm_cli_handler, test_running, read_serial_thread, process_commands_thread, test, freeze, test_pk, db_manager
 
     if test_running.is_set():
         log_to_console("Остановка активного процесса...")
@@ -442,6 +483,17 @@ def stop_test():
         # Сбрасываем флаги и останавливаем потоки
         stop_event.set()
         test_running.clear()
+
+        if test:
+            try:
+                print("попытка анализа данных с теста")
+                analyze_DB(test_pk, db_manager)
+                test = False
+            except Exception as e:
+                print(e)
+
+        if freeze:
+            freeze = False
 
         # Принудительно завершаем потоки
         if read_serial_thread and read_serial_thread.is_alive():
@@ -467,7 +519,6 @@ def start_freeze():
     """Отправка команды для запуска охлаждения через dm-cli."""
     global dm_cli_handler, test_running, lopasti, pulse_min
 
-    # Сброс состояния и проверка порта
     reset_test_state()
     port = com_port_combobox.get()
     if not port:
@@ -484,7 +535,7 @@ def start_freeze():
     # Запускаем dm-cli в отдельном потоке
     script = os.path.join(lua_folder, "cooling.lua")
     cooling_thread = threading.Thread(
-        target=dm_cli_handler.run_test, args=(port, 1200, pulse_min, script, lopasti), daemon=True
+        target=dm_cli_handler.run_test, args=(port, 1200, pulse_min, script, lopasti, tenz1, tenz2, tenz3), daemon=True
     )
     cooling_thread.start()
 
@@ -508,6 +559,7 @@ def emergency_stop(event):
     stop_test()
     reset_test_state()
 
+
 def reset_test_state():
     global current_rpm, previous_rpm, current_speed, previous_speed
     global current_avg_rpm, previous_avg_rpm, rpm_count
@@ -530,16 +582,6 @@ def reset_test_state():
     with lock:
         while not command_queue.empty():
             command_queue.get()
-
-
-def update_stand_name(stand_name):
-    """Обновляет интерфейс в зависимости от выбранного стенда."""
-    if stand_name == "шпиндель":
-        engine_name_entry.config(state=tk.DISABLED)  # Отключаем поле ввода двигателя
-        engine_name_label.config(text="")  # Скрываем метку поля
-    else:
-        engine_name_entry.config(state=tk.NORMAL)  # Включаем поле для других стендов
-        engine_name_label.config(text="Двигатель:")  # Восстанавливаем метку
 
 
 def close_application():
@@ -601,15 +643,49 @@ def update_com_ports():
         log_to_console(f"Ошибка при обновлении списка портов: {e}")
 
 
+def save_config():
+    """Сохраняет текущие настройки в файл конфигурации."""
+    with open(CONFIG_FILE, 'w') as config_file:
+        json.dump(config, config_file, indent=4)
+
+
 def set_lopasti():
-    """Устанавливает значение для глобальной переменной lopasti."""
+    """Устанавливает значение для глобальной переменной lopasti и обновляет конфигурацию."""
     global lopasti
     try:
         new_value = int(lopasti_entry.get())
         lopasti = new_value
-        log_to_console(f"Значение lopasti изменено на: {lopasti}")
+        config['lopasti'] = lopasti
+        save_config()
+        log_to_console(f"Значение lopasti изменено на: {lopasti} и сохранено в конфигурации.")
     except ValueError:
         log_to_console("Ошибка: введите целое число для lopasti.")
+
+
+def set_tenz1():
+    """Устанавливает значение для глобальной переменной lopasti и обновляет конфигурацию."""
+    global tenz1
+    try:
+        new_value = int(tenz1_entry.get())
+        tenz1 = new_value
+        config['tenz1'] = tenz1
+        save_config()
+        log_to_console(f"Значение коэффициента тяги изменено на: {tenz1} и сохранено в конфигурации.")
+    except ValueError:
+        log_to_console("Ошибка: введите число")
+
+
+def set_tenz2():
+    """Устанавливает значение для глобальной переменной lopasti и обновляет конфигурацию."""
+    global tenz2
+    try:
+        new_value = int(tenz2_entry.get())
+        tenz2 = new_value
+        config['tenz2'] = tenz2
+        save_config()
+        log_to_console(f"Значение коэффициента момента изменено на: {tenz2} и сохранено в конфигурации.")
+    except ValueError:
+        log_to_console("Ошибка: введите число")
 
 
 def update_pulse_values():
@@ -664,7 +740,7 @@ def start_manual_monitoring():
     test_running.set()
 
     try:
-        script = os.path.join(lua_folder,"monitoring.lua")
+        script = os.path.join(lua_folder, "monitoring.lua")
         monitoring_thread = threading.Thread(
             target=dm_cli_handler.run_test,
             args=(port, 1200, 1200, script, lopasti),
@@ -706,6 +782,7 @@ def stop_manual_monitoring():
     else:
         log_to_console("Мониторинг не запущен.")
 
+
 def update_frame(event):
     global manual_frame, settings_frame, test_frame_active
     """Скрыть элементы теста (main_frame и его содержимое), если активна вкладка 'Ручное управление'."""
@@ -721,7 +798,6 @@ def update_frame(event):
         manual_frame = False
         settings_frame = True
         test_frame_active = False
-
 
 
 def add_motor():
@@ -741,12 +817,14 @@ def add_motor():
     model_entry.delete(0, tk.END)
     kv_entry.delete(0, tk.END)
 
+
 def update_motor_list():
     """Обновляет список двигателей из базы данных"""
-    motors_listbox.delete(0, tk.END)  # Очистить список
+    motors_listbox.delete(0, tk.END)
     motors = db_manager.get_all_motors()
     for motor in motors:
         motors_listbox.insert(tk.END, f"{motor.producer}, {motor.model_name}, {motor.kv} KV")
+
 
 def delete_motor():
     """Удаляет выбранный двигатель из базы данных"""
@@ -764,6 +842,7 @@ def delete_motor():
         db_message = db_manager.delete_motor(producer, model, kv)
         print(db_message)
         update_motor_list()
+
 
 root = ThemedTk()
 root.get_themes()
@@ -783,35 +862,70 @@ notebook.add(test_frame, text="Тест")
 settings_frame = tk.Frame(notebook)
 notebook.add(settings_frame, text="Настройки")
 
-# Вкладка для ручного управления
-manual_control_frame = tk.Frame(notebook)
-notebook.add(manual_control_frame, text="Ручное управление")
+
 
 # Вкладка для двигателей
 motors_frame = tk.Frame(notebook)
 notebook.add(motors_frame, text="Двигатели")
 
-# # Создаем основную рамку для размещения элементов
-# main_frame = tk.Frame(root, padx=10, pady=10)
-# main_frame.pack(expand=True, fill=tk.BOTH)
-
 # Поля для ввода названия двигателя и пропеллера в тестовой вкладке
 input_frame = tk.Frame(test_frame)
-input_frame.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky='ew')
+input_frame.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky='nsew')
 
-engine_name_label = tk.Label(input_frame, text="Название двигателя:")
-engine_name_label.grid(row=0, column=0, padx=10, pady=5, sticky='w')
-engine_name_entry = tk.Entry(input_frame)
-engine_name_entry.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
+# Установка веса для растяжения столбцов
+test_frame.columnconfigure(0, weight=1)
+test_frame.columnconfigure(1, weight=1)
+settings_frame.columnconfigure(1, weight=1)
+input_frame.columnconfigure(1, weight=1)
+test_frame.grid_rowconfigure(6, weight=1)
+test_frame.grid_columnconfigure(0, weight=1)
+test_frame.grid_columnconfigure(1, weight=1)
+test_frame.grid_columnconfigure(2, weight=1)
 
-propeller_name_label = tk.Label(input_frame, text="Название пропеллера:")
-propeller_name_label.grid(row=1, column=0, padx=10, pady=5, sticky='w')
-propeller_name_entry = tk.Entry(input_frame)
-propeller_name_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
+#
+# Выбор двигателя и пропеллера
+#
+def update_engine_combobox():
+    """Обновляет список двигателей в комбобоксе"""
+    motors = db_manager.get_all_motors()
+    engine_combobox['values'] = [
+        f"{motor.producer} {motor.model_name} {motor.kv}" for motor in motors
+    ]
+
+
+def update_propeller_combobox():
+    """Обновляет список пропеллеров в комбобоксе"""
+    propellers = db_manager.get_all_propellers()
+    propeller_combobox['values'] = [
+        f"{prop.producer} {prop.diameter} {prop.pitch} {prop.blades}" for prop in propellers
+    ]
+
+
+# Выпадающий список для двигателей
+engine_label = tk.Label(input_frame, text="Двигатель:")
+engine_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+engine_combobox = ttk.Combobox(input_frame, state="readonly")
+engine_combobox.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
+
+# Выпадающий список для пропеллеров
+propeller_label = tk.Label(input_frame, text="Пропеллер:")
+propeller_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+
+propeller_combobox = ttk.Combobox(input_frame, state="readonly")
+propeller_combobox.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+
+# Кнопка обновления списков
+update_button = tk.Button(input_frame, text="Обновить списки",
+                          command=lambda: [update_engine_combobox(), update_propeller_combobox()])
+update_button.grid(row=2, column=0, columnspan=2, pady=10)
+
+update_engine_combobox()
+update_propeller_combobox()
 
 # Лого в тестовой вкладке
 try:
-    image = Image.open("dron_motors.png")  # Загрузите изображение
+    image = Image.open("dron_motors.png")
     image = image.resize((250, 100), Image.Resampling.LANCZOS)
     logo_photo = ImageTk.PhotoImage(image)
     logo_label = tk.Label(test_frame, image=logo_photo)
@@ -821,10 +935,12 @@ except FileNotFoundError:
 
 input_frame.columnconfigure(1, weight=1)
 
+
 def update_test_percent():
     global test_percent
     test_percent = test_percent_slider.get()
     log_to_console(f"Процент разгона: {test_percent}")
+
 
 # Ползунок для процента разгона
 test_percent_label = tk.Label(test_frame, text="Процент разгона")
@@ -928,16 +1044,36 @@ max_current_threshold_button.grid(row=0, column=2, padx=10, pady=5)
 
 # Настройки lopasti
 lopasti_label = tk.Label(
-    settings_frame, text="Количество лопастей\n(3 по умолчанию)")
+    settings_frame, text=f"Количество лопастей\n({lopasti} текущее)")
 lopasti_label.grid(row=1, column=0, padx=10, pady=5, sticky='e')
-
 lopasti_entry = tk.Entry(settings_frame)
 lopasti_entry.insert(0, "3")
 lopasti_entry.grid(row=1, column=1, padx=10, pady=5, sticky='ew')
-
 lopasti_button = ttk.Button(
     settings_frame, text="Установить", command=set_lopasti)
 lopasti_button.grid(row=1, column=2, padx=10, pady=5)
+
+# Настройки tenz1
+tenz1_label = tk.Label(
+    settings_frame, text=f"Коэффициент для тяги\n({tenz1} текущее)")
+tenz1_label.grid(row=2, column=0, padx=10, pady=5, sticky='e')
+tenz1_entry = tk.Entry(settings_frame)
+tenz1_entry.insert(0, f"{tenz1}")
+tenz1_entry.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
+tenz1_button = ttk.Button(
+    settings_frame, text="Установить", command=set_tenz1)
+tenz1_button.grid(row=2, column=2, padx=10, pady=5)
+
+# Настройки tenz2
+tenz2_label = tk.Label(
+    settings_frame, text=f"Коэффициент для момента\n({tenz2} текущее)")
+tenz2_label.grid(row=3, column=0, padx=10, pady=5, sticky='e')
+tenz2_entry = tk.Entry(settings_frame)
+tenz2_entry.insert(0, f"{tenz2}")
+tenz2_entry.grid(row=3, column=1, padx=10, pady=5, sticky='ew')
+tenz2_button = ttk.Button(
+    settings_frame, text="Установить", command=set_tenz2)
+tenz2_button.grid(row=3, column=2, padx=10, pady=5)
 
 settings_frame.columnconfigure(1, weight=1)
 
@@ -976,48 +1112,14 @@ instruction_label.grid(row=2, column=0, columnspan=3,
 test_console_output = scrolledtext.ScrolledText(
     test_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED)
 test_console_output.grid(row=6, column=0, columnspan=3,
-                    padx=10, pady=10, sticky='nsew')
+                         padx=10, pady=10, sticky='nsew')
 
 # Консольное окно в настройках
 settings_console_output = scrolledtext.ScrolledText(
     settings_frame, wrap=tk.WORD, height=30, width=60, state=tk.DISABLED)
 settings_console_output.grid(row=6, column=0, columnspan=3,
-                    padx=10, pady=10, sticky='nsew')
+                             padx=10, pady=10, sticky='nsew')
 
-# Консольное окно в ручном управлении
-manual_console_output = scrolledtext.ScrolledText(
-    manual_control_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED
-)
-manual_console_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
-# Фрейм для кнопок управления
-manual_buttons_frame = tk.Frame(manual_control_frame)
-manual_buttons_frame.pack(pady=10, fill=tk.X)
-
-# Кнопки для ручного управления
-ttk.Button(
-    manual_buttons_frame,
-    text="Начать мониторинг",
-    command=start_manual_monitoring
-).pack(side=tk.LEFT, padx=10)
-
-ttk.Button(
-    manual_buttons_frame,
-    text="Завершить мониторинг",
-    command=stop_manual_monitoring
-).pack(side=tk.LEFT, padx=10)
-
-ttk.Button(
-    manual_buttons_frame,
-    text="Начать логирование",
-    command=lambda: log_to_console("Логирование начато")
-).pack(side=tk.LEFT, padx=10)
-
-ttk.Button(
-    manual_buttons_frame,
-    text="Завершить логирование",
-    command=lambda: log_to_console("Логирование завершено")
-).pack(side=tk.LEFT, padx=10)
 
 notebook.bind("<<NotebookTabChanged>>", update_frame)
 update_frame(None)
@@ -1071,6 +1173,129 @@ delete_motor_button = ttk.Button(motors_list_frame, text="Удалить дви�
 delete_motor_button.pack(pady=5)
 
 #
+# Вкладка с историей тестов
+#
+# Вкладка с историей тестов
+history_frame = tk.Frame(notebook)
+notebook.add(history_frame, text="История ")
+
+# Заголовок для списка тестов
+tk.Label(history_frame, text="Список тестов", font=("Arial", 14)).pack(pady=10)
+
+# Скроллируемый список тестов
+tests_canvas = tk.Canvas(history_frame)
+scrollbar = tk.Scrollbar(history_frame, orient="vertical", command=tests_canvas.yview)
+scrollable_frame = tk.Frame(tests_canvas)
+
+scrollable_frame.bind(
+    "<Configure>",
+    lambda e: tests_canvas.configure(scrollregion=tests_canvas.bbox("all"))
+)
+
+tests_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+tests_canvas.configure(yscrollcommand=scrollbar.set)
+
+tests_canvas.pack(side="left", fill="both", expand=True)
+scrollbar.pack(side="right", fill="y")
+
+
+# Функция для отображения деталей теста
+def show_test_details(parent_frame, test):
+    for widget in parent_frame.winfo_children():
+        widget.destroy()
+
+    # test_data = db_manager.get_cleaned_test_data(test.test_pk)
+
+    details = [
+        f"ID теста: {test.test_pk}",
+        f"Дата теста: {test.test_date.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Описание: {test.motor_id_fk}",
+    ]
+
+    for detail in details:
+        tk.Label(parent_frame, text=detail, anchor="w").pack(fill="x", padx=10, pady=2)
+
+
+# Функция для переключения состояния
+def toggle_details(details_frame, test_data):
+    if details_frame.winfo_ismapped():
+        details_frame.pack_forget()  # Скрыть, если уже отображается
+    else:
+        show_test_details(details_frame, test_data)  # Показать содержимое
+        details_frame.pack(fill="x", padx=10, pady=5)  # Убедиться, что отображается
+
+
+# Получение данных из базы и отображение списка тестов
+tests = db_manager.get_all_test()
+
+for test in tests:
+    test_frame = tk.Frame(scrollable_frame, relief="solid", bd=1, padx=5, pady=5)
+    test_frame.pack(fill="x", pady=5)
+
+    # Заголовок теста
+    motor = db_manager.get_motor_by_id(test.motor_id_fk)
+    motor = f"{motor.producer} {motor.model_name} {motor.kv}"
+    propeller = db_manager.get_propeller_by_id(test.propeller_id_fk)
+    propeller = f"{propeller.producer} {propeller.diameter}x{propeller.pitch}x{propeller.blades}"
+    test_title = f"Мотор: {motor} X Пропеллер: {propeller}"
+    tk.Label(test_frame, text=test_title, font=("Arial", 12, "bold")).pack(anchor="w")
+
+    # Фрейм для деталей
+    details_frame = tk.Frame(test_frame)
+
+    # Кнопка для раскрытия подробностей
+    tk.Button(
+        test_frame,
+        text="Развернуть",
+        command=lambda df=details_frame, td=test: toggle_details(df, td),  # Передача аргументов
+        width=10,
+    ).pack(anchor="e", pady=2)
+
+#
+# Вкладка с ручным управлением
+#
+
+# # Вкладка для ручного управления
+# manual_control_frame = tk.Frame(notebook)
+# notebook.add(manual_control_frame, text="Ручное управление")
+
+# # Консольное окно в ручном управлении
+# manual_console_output = scrolledtext.ScrolledText(
+#     manual_control_frame, wrap=tk.WORD, height=15, width=60, state=tk.DISABLED
+# )
+# manual_console_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+#
+# # Фрейм для кнопок управления
+# manual_buttons_frame = tk.Frame(manual_control_frame)
+# manual_buttons_frame.pack(pady=10, fill=tk.X)
+
+# Кнопки для ручного управления
+# ttk.Button(
+#     manual_buttons_frame,
+#     text="Начать мониторинг",
+#     command=start_manual_monitoring
+# ).pack(side=tk.LEFT, padx=10)
+#
+# ttk.Button(
+#     manual_buttons_frame,
+#     text="Завершить мониторинг",
+#     command=stop_manual_monitoring
+# ).pack(side=tk.LEFT, padx=10)
+#
+# ttk.Button(
+#     manual_buttons_frame,
+#     text="Начать логирование",
+#     command=lambda: log_to_console("Логирование начато")
+# ).pack(side=tk.LEFT, padx=10)
+#
+# ttk.Button(
+#     manual_buttons_frame,
+#     text="Завершить логирование",
+#     command=lambda: log_to_console("Логирование завершено")
+# ).pack(side=tk.LEFT, padx=10)
+
+
+#
 # ВКЛАДКА С ПРОПЕЛЛЛЕРАМИ
 #
 def add_propeller():
@@ -1090,7 +1315,7 @@ def add_propeller():
     propeller_producer_entry.delete(0, tk.END)
     diameter_entry.delete(0, tk.END)
     pitch_entry.delete(0, tk.END)
-    blade_entry.delete(0,tk.END)
+    blade_entry.delete(0, tk.END)
 
 
 def update_propeller_list():
@@ -1098,7 +1323,8 @@ def update_propeller_list():
     propellers_listbox.delete(0, tk.END)  # Очистить список
     propellers = db_manager.get_all_propellers()
     for propeller in propellers:
-        propellers_listbox.insert(tk.END, f"{propeller.producer}, {propeller.diameter}, {propeller.pitch}, {propeller.blades}")
+        propellers_listbox.insert(tk.END,
+                                  f"{propeller.producer}, {propeller.diameter}, {propeller.pitch}, {propeller.blades}")
 
 
 def delete_propeller():
@@ -1114,11 +1340,13 @@ def delete_propeller():
         print(e)
         messagebox.showerror("Ошибка", "Пожалуйста, выберите пропеллер для удаления.")
         return
-    answer = messagebox.askyesno("Подтверждение", f"Вы уверены, что хотите удалить пропеллер {producer} {diameter}x{pitch}x{blades}?")
+    answer = messagebox.askyesno("Подтверждение",
+                                 f"Вы уверены, что хотите удалить пропеллер {producer} {diameter}x{pitch}x{blades}?")
     if answer:
         db_message = db_manager.delete_propeller(producer, diameter, pitch, blades)
         print(db_message)
         update_propeller_list()
+
 
 propeller_frame = tk.Frame(notebook)
 notebook.add(propeller_frame, text="Пропеллеры")
@@ -1176,15 +1404,13 @@ delete_propeller_button = ttk.Button(propellers_list_frame, text="Удалить
 # delete_propeller_button = ttk.Button(propellers_list_frame, text="Удалить пропеллер", command=lambda x:x)
 delete_propeller_button.pack(pady=5)
 
-test_frame.columnconfigure(2, weight=1)
-
-# Позволяет консольному окну растягиваться
-test_frame.rowconfigure(6, weight=1)
-
 # Закрытие приложения
 root.protocol("WM_DELETE_WINDOW", close_application)
 
 # Привязка клавиши 'Esc' к экстренной остановке
 root.bind('<Escape>', emergency_stop)
+
+update_motor_list()
+update_propeller_list()
 
 root.mainloop()

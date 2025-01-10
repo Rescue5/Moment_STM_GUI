@@ -2,12 +2,9 @@ local tag = 'idle'
 local lastTele = {}
 
 -- Коэффициенты масштабирования для тензодатчиков
---local scaleFactors = {-220.4, -490510.5, -474912.8} -- По умолчанию установлены коэффициенты 1
---local scaleFactors = {-430.468, -490510.5, -474912.8} -- По умолчанию установлены коэффициенты 1
-local scaleFactors = {-430.468, -868021, -474912.8} -- По умолчанию установлены коэффициенты 1
-
+--local scaleFactors = {-430.468, -868021, -474912.8} -- По умолчанию установлены коэффициенты 1
+local scaleFactors = {0, 0, 0} -- По умолчанию установлены коэффициенты 1
 local rpmcoef = 1
---local current_coef = 0,955882353
 
 local function setScale(index, scale)
    if index < 1 or index > 3 then
@@ -23,6 +20,9 @@ end
 
 local function onConnect()
    local sampleRate = intParam('sampleRate', 10)
+   scaleFactors[1] = intParam('tenz1', -430.468)
+   scaleFactors[2] = intParam('tenz2', -868021)
+   scaleFactors[3] = intParam('tenz3', -474912.8)
    sample(sampleRate)
    tare()
 end
@@ -122,5 +122,5 @@ return {
    OnConnect    = onConnect,
    OnTelemetry  = onTelemetry,
    OnDisconnect = onDisconnect,
-   SetScale     = setScale, -- Экспортируем функцию для установки коэффициентов
+   SetScale     = setScale,
 }

@@ -32,40 +32,39 @@ CREATE TABLE IF NOT EXISTS tests (
     test_pk SERIAL PRIMARY KEY,
     motor_id_fk INTEGER NOT NULL REFERENCES motors(motors_pk),
     propeller_id_fk INTEGER NOT NULL REFERENCES propellers(propellers_pk),
-    test_date DATE NOT NULL
+    test_date TIMESTAMP NOT NULL
 );
 
 -- Таблица сырых данных тестов
 CREATE TABLE IF NOT EXISTS raw_tests_data (
     test_id_fk INTEGER NOT NULL REFERENCES tests(test_pk),
-    time FLOAT NOT NULL,
-    throttle FLOAT,
-    moment FLOAT,
-    thrust FLOAT,
-    rpm FLOAT,
-    current FLOAT,
-    voltage FLOAT,
-    power FLOAT,
-    temperature FLOAT,
-    mech_power FLOAT,
-    efficiency FLOAT,
+    time TIMESTAMP NOT NULL,
+    throttle SMALLINT,
+    moment NUMERIC(10, 4),
+    thrust SMALLINT,
+    rpm INTEGER,
+    current NUMERIC(10, 4),
+    voltage NUMERIC(10, 4),
+    power NUMERIC(10, 4),
+    temperature NUMERIC(10, 4),
+    mech_power NUMERIC(10, 4),
+    efficiency NUMERIC(10, 4),
     PRIMARY KEY (test_id_fk, time)
 );
 
--- Таблица очищенных данных тестов
 CREATE TABLE IF NOT EXISTS clean_tests_data (
     test_id_fk INTEGER NOT NULL REFERENCES tests(test_pk),
-    time FLOAT NOT NULL,
-    throttle FLOAT,
-    moment FLOAT,
-    thrust FLOAT,
-    rpm FLOAT,
-    current FLOAT,
-    voltage FLOAT,
-    power FLOAT,
-    temperature FLOAT,
-    mech_power FLOAT,
-    efficiency FLOAT,
+    time TIMESTAMP NOT NULL,
+    throttle SMALLINT,
+    moment NUMERIC(10, 4),
+    thrust SMALLINT,
+    rpm INTEGER,
+    current NUMERIC(10, 4),
+    voltage NUMERIC(10, 4),
+    power NUMERIC(10, 4),
+    temperature NUMERIC(10, 4),
+    mech_power NUMERIC(10, 4),
+    efficiency NUMERIC(10, 4),
     PRIMARY KEY (test_id_fk, time)
 );
 """
